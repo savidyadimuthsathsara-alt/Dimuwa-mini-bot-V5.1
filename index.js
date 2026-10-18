@@ -3,7 +3,7 @@
 /*
   DIMUWA MINI BOT VERSION 5.1.0 (PREMIUM LIVE DASHBOARD)
   Creator: Dimuth Sathsara
-  Fixed: Interactive Downloader, Status React, Pairing Code Generation (Socket Wait)
+  Fixed: Auto-Reset Stuck Sessions, Interactive Downloader, UI Status Accuracy
 */
 
 const express = require("express");
@@ -31,9 +31,6 @@ const {
   proto
 } = require("@whiskeysockets/baileys");
 
-// ==========================================
-// APP CONFIG & DIRECTORIES
-// ==========================================
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, "data");
 const SESSION_DIR = path.join(DATA_DIR, "sessions_new");
@@ -59,28 +56,12 @@ for (const dir of [DATA_DIR, SESSION_DIR, MEDIA_DIR, TOOLS_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-const DEFAULT_SETTINGS = {
-  alwaysOnline: "ON",
-  autoRead: "OFF",
-  botMode: "PUBLIC",
-  statusRead: "ON",
-  statusReact: "GREEN",
-  composing: "ON",
-  antiDelete: "ON",
-  antiDelTarget: "PRIVATE",
-  vvTarget: "PRIVATE",
-  saveTarget: "PRIVATE",
-  botPower: "ON",
-  autoSaveViewOnce: "ON"
-};
+const DEFAULT_SETTINGS = { alwaysOnline: "ON", autoRead: "OFF", botMode: "PUBLIC", statusRead: "ON", statusReact: "GREEN", composing: "ON", antiDelete: "ON", antiDelTarget: "PRIVATE", vvTarget: "PRIVATE", saveTarget: "PRIVATE", botPower: "ON", autoSaveViewOnce: "ON" };
 
-// ==========================================
-// IN-MEMORY STORAGE
-// ==========================================
 const bots = new Map();
 const startingBots = new Map();
 const qrStore = new Map();
-const pairingStore = new Map(); // Added cache for pairing codes
+const pairingStore = new Map();
 const messageCache = new Map();
 const msgRetryCounterCache = new NodeCache(); 
 
@@ -88,109 +69,26 @@ const MAX_MESSAGE_CACHE = 3000;
 const CACHE_TTL = 2 * 60 * 60 * 1000;
 const statusReactList = ["❤️", "💚", "💙", "💛", "🤍", "🧡", "💜", "🩷", "🔥", "😂", "😍", "😮", "👍", "🥰", "😎", "🎉", "✨", "💯", "🙌", "🤩", "😘", "🤗", "🌟", "💫"];
 
-// ==========================================
-// DATABASE HELPERS
-// ==========================================
-function readJson(file, fallback) {
-  try {
-    if (!fs.existsSync(file)) return fallback;
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJson(file, data) {
-  try {
-    const temp = `${file}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify(data, null, 2), "utf8");
-    fs.renameSync(temp, file);
-  } catch {}
-}
+function readJson(file, fallback) { try { if (!fs.existsSync(file)) return fallback; return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; } }
+function writeJson(file, data) { try { const temp = `${file}.tmp`; fs.writeFileSync(temp, JSON.stringify(data, null, 2), "utf8"); fs.renameSync(temp, file); } catch {} }
 
 const settingsDB = readJson(SETTINGS_FILE, {});
 const statsDB = readJson(STATS_FILE, {});
 
-function cleanUsername(username) {
-  return String(username || "default").trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60) || "default";
-}
+function cleanUsername(username) { return String(username || "default").trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60) || "default"; }
+function sessionPath(username) { return path.join(SESSION_DIR, `session_${cleanUsername(username)}`); }
+function getSettings(username) { const key = cleanUsername(username); if (!settingsDB[key]) { settingsDB[key] = { ...DEFAULT_SETTINGS }; writeJson(SETTINGS_FILE, settingsDB); } else { settingsDB[key] = { ...DEFAULT_SETTINGS, ...settingsDB[key] }; } return settingsDB[key]; }
+function saveSettings(username, settings) { const key = cleanUsername(username); settingsDB[key] = { ...DEFAULT_SETTINGS, ...settings }; writeJson(SETTINGS_FILE, settingsDB); }
+function getStats(username) { const key = cleanUsername(username); if (!statsDB[key]) { statsDB[key] = { messages: 0, commands: 0, downloads: 0, startedAt: Date.now(), connectedAt: null, lastSeen: null }; writeJson(STATS_FILE, statsDB); } return statsDB[key]; }
+function saveStats() { writeJson(STATS_FILE, statsDB); }
+function incrementStat(username, field, amount = 1) { const stats = getStats(username); stats[field] = Number(stats[field] || 0) + amount; saveStats(); }
 
-function sessionPath(username) {
-  return path.join(SESSION_DIR, `session_${cleanUsername(username)}`);
-}
-
-function getSettings(username) {
-  const key = cleanUsername(username);
-  if (!settingsDB[key]) {
-    settingsDB[key] = { ...DEFAULT_SETTINGS };
-    writeJson(SETTINGS_FILE, settingsDB);
-  } else {
-    settingsDB[key] = { ...DEFAULT_SETTINGS, ...settingsDB[key] };
-  }
-  return settingsDB[key];
-}
-
-function saveSettings(username, settings) {
-  const key = cleanUsername(username);
-  settingsDB[key] = { ...DEFAULT_SETTINGS, ...settings };
-  writeJson(SETTINGS_FILE, settingsDB);
-}
-
-function getStats(username) {
-  const key = cleanUsername(username);
-  if (!statsDB[key]) {
-    statsDB[key] = {
-      messages: 0,
-      commands: 0,
-      downloads: 0,
-      startedAt: Date.now(),
-      connectedAt: null,
-      lastSeen: null
-    };
-    writeJson(STATS_FILE, statsDB);
-  }
-  return statsDB[key];
-}
-
-function saveStats() {
-  writeJson(STATS_FILE, statsDB);
-}
-
-function incrementStat(username, field, amount = 1) {
-  const stats = getStats(username);
-  stats[field] = Number(stats[field] || 0) + amount;
-  saveStats();
-}
-
-// ==========================================
-// UTILITY HELPERS
-// ==========================================
-function isConnected(sock) {
-  return !!(sock && sock.user && sock.user.id);
-}
-
-function getOwnerJid(sock) {
-  return sock?.user?.id ? sock.user.id : null;
-}
-
-function jidNumber(jid) {
-  return String(jid || "").split("@")[0].split(":")[0].replace(/\D/g, "");
-}
-
-function normalizePhone(phone) {
-  return String(phone || "").replace(/\D/g, "").replace(/^00/, "");
-}
-
-function isOwner(sock, msg) {
-  const o = getOwnerJid(sock);
-  if (!o) return false;
-  if (msg.key?.fromMe) return true;
-  return jidNumber(msg.key?.participant || msg.key?.remoteJid) === jidNumber(o);
-}
-
-function isGroupJid(jid) {
-  return String(jid || "").endsWith("@g.us");
-}
+function isConnected(sock) { return !!(sock && sock.user && sock.user.id); }
+function getOwnerJid(sock) { return sock?.user?.id ? sock.user.id : null; }
+function jidNumber(jid) { return String(jid || "").split("@")[0].split(":")[0].replace(/\D/g, ""); }
+function normalizePhone(phone) { return String(phone || "").replace(/\D/g, "").replace(/^00/, ""); }
+function isOwner(sock, msg) { const o = getOwnerJid(sock); if (!o) return false; if (msg.key?.fromMe) return true; return jidNumber(msg.key?.participant || msg.key?.remoteJid) === jidNumber(o); }
+function isGroupJid(jid) { return String(jid || "").endsWith("@g.us"); }
 
 function getMessageText(msg) {
   if (!msg?.message) return "";
@@ -198,94 +96,53 @@ function getMessageText(msg) {
   return m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || m.documentMessage?.caption || "";
 }
 
-// ==========================================
-// MESSAGE CACHE (ANTI-DELETE)
-// ==========================================
-function cacheKey(key) {
-  return key && key.id ? key.id : null;
-}
-
+function cacheKey(key) { return key && key.id ? key.id : null; }
 function cacheMessage(msg) {
   if (!msg || !msg.key || !msg.message) return;
   const key = cacheKey(msg.key);
   if (!key) return;
-  
   messageCache.set(key, { message: msg, savedAt: Date.now() });
-  
-  if (messageCache.size > MAX_MESSAGE_CACHE) {
-    const first = messageCache.keys().next().value;
-    if (first) messageCache.delete(first);
-  }
+  if (messageCache.size > MAX_MESSAGE_CACHE) { const first = messageCache.keys().next().value; if (first) messageCache.delete(first); }
 }
-
 function getCachedMessage(key) {
   if (!key) return null;
   const item = messageCache.get(cacheKey(key));
   if (item && Date.now() - item.savedAt <= CACHE_TTL) return item.message;
   return null;
 }
+setInterval(() => { const now = Date.now(); for (const [k, v] of messageCache) if (now - v.savedAt > CACHE_TTL) messageCache.delete(k); }, 10 * 60 * 1000);
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of messageCache) {
-    if (now - v.savedAt > CACHE_TTL) messageCache.delete(k);
-  }
-}, 10 * 60 * 1000);
-
-// ==========================================
-// STATUS READ & REACT
-// ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
   const participant = msg.key?.participant;
   if (!participant) return;
 
-  if (s.statusRead === "ON") {
-    await sock.readMessages([msg.key]).catch(() => {});
-  }
-  
+  if (s.statusRead === "ON") await sock.readMessages([msg.key]).catch(() => {});
   if (s.statusReact !== "OFF" && !msg.key.fromMe) {
     const emoji = s.statusReact === "RANDOM" ? statusReactList[Math.floor(Math.random() * statusReactList.length)] : "💚";
-    try {
-      await sock.sendMessage("status@broadcast", {
-        react: { text: emoji, key: msg.key }
-      }, { 
-        statusJidList: [participant, getOwnerJid(sock)].filter(Boolean) 
-      });
-    } catch (e) {
-      logger.error("Failed to react to status");
-    }
+    try { await sock.sendMessage("status@broadcast", { react: { text: emoji, key: msg.key } }, { statusJidList: [participant, getOwnerJid(sock)].filter(Boolean) }); } catch (e) {}
   }
 }
 
-// ==========================================
-// MEDIA & VIEW ONCE HANDLING
-// ==========================================
 function unwrapViewOnce(msg) {
   if (!msg?.message) return null;
   let m = msg.message;
-  
   if (m.documentWithCaptionMessage) m = m.documentWithCaptionMessage.message;
   if (m.ephemeralMessage) m = m.ephemeralMessage.message;
   if (m.viewOnceMessageV2Extension) m = m.viewOnceMessageV2Extension.message;
   if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
   if (m.viewOnceMessage) m = m.viewOnceMessage.message;
-  
   const innerType = getContentType(m);
   if (m[innerType]?.viewOnce) return { type: innerType, content: m[innerType], innerMessage: m };
   return null;
 }
-
-function isViewOnceMessage(msg) {
-  return !!unwrapViewOnce(msg);
-}
+function isViewOnceMessage(msg) { return !!unwrapViewOnce(msg); }
 
 function getMediaInfo(message) {
   if (!message) return null;
   const m = normalizeMessageContent(message) || message;
   const t = getContentType(m);
   const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio", documentMessage: "document", stickerMessage: "sticker" };
-  
   if (!map[t]) return null;
   return { type: t, mediaType: map[t], content: m[t] };
 }
@@ -295,70 +152,46 @@ function getQuotedMessage(msg) {
   const m = normalizeMessageContent(msg.message) || msg.message;
   const t = getContentType(m);
   const c = m[t]?.contextInfo;
-  
   if (!c?.quotedMessage || !c?.stanzaId) return null;
-  
   const rJid = c.remoteJid || msg.key.remoteJid;
   const p = c.participant || rJid;
-  return { 
-    key: { 
-      remoteJid: rJid, 
-      fromMe: jidNumber(p) === jidNumber(msg.key?.fromMe ? msg.key.remoteJid : null), 
-      id: c.stanzaId, 
-      participant: p 
-    }, 
-    message: c.quotedMessage 
-  };
+  return { key: { remoteJid: rJid, fromMe: jidNumber(p) === jidNumber(msg.key?.fromMe ? msg.key.remoteJid : null), id: c.stanzaId, participant: p }, message: c.quotedMessage };
 }
 
 async function downloadWhatsAppMedia(sock, message) {
   const info = getMediaInfo(message.message);
   if (!info) throw new Error("Unsupported media.");
-  
   const buffer = await downloadMediaMessage(message, "buffer", {}, { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) });
   if (!buffer?.length) throw new Error("Empty media buffer.");
-  
   return { buffer, ...info };
 }
 
 async function downloadViewOnceMedia(sock, msg) {
   const vo = unwrapViewOnce(msg);
   if (!vo) throw new Error("Not a view-once message.");
-  
   const buffer = await downloadMediaMessage({ key: msg.key, message: vo.innerMessage }, "buffer", {}, { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) });
   const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
-  
   return { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
 }
 
 async function sendWhatsAppMedia(sock, jid, media) {
   const { buffer, mediaType, content } = media;
   const caption = content?.caption || "";
-  
   if (!Buffer.isBuffer(buffer) || !buffer.length) return;
-  
-  if (mediaType === "image") {
-    await sock.sendMessage(jid, { image: buffer, caption });
-  } else if (mediaType === "video") {
-    await sock.sendMessage(jid, { video: buffer, caption });
-  } else if (mediaType === "audio") {
-    await sock.sendMessage(jid, { audio: buffer, mimetype: content?.mimetype || "audio/mp4", ptt: !!content?.ptt });
-  } else if (mediaType === "sticker") {
-    await sock.sendMessage(jid, { sticker: buffer });
-  } else if (mediaType === "document") {
-    await sock.sendMessage(jid, { document: buffer, mimetype: content?.mimetype || "application/octet-stream", fileName: content?.fileName || "DIMUWA_FILE" });
-  }
+  if (mediaType === "image") await sock.sendMessage(jid, { image: buffer, caption });
+  else if (mediaType === "video") await sock.sendMessage(jid, { video: buffer, caption });
+  else if (mediaType === "audio") await sock.sendMessage(jid, { audio: buffer, mimetype: content?.mimetype || "audio/mp4", ptt: !!content?.ptt });
+  else if (mediaType === "sticker") await sock.sendMessage(jid, { sticker: buffer });
+  else if (mediaType === "document") await sock.sendMessage(jid, { document: buffer, mimetype: content?.mimetype || "application/octet-stream", fileName: content?.fileName || "DIMUWA_FILE" });
 }
 
 function canProcessMessage(sock, username, msg) {
   const s = getSettings(username);
   if (s.botPower !== "ON") return false;
-  
   const mode = String(s.botMode || "PUBLIC").toUpperCase();
   if (mode === "PUBLIC") return true;
   if (mode === "PRIVATE") return (msg.key?.fromMe || msg.key?.remoteJid === getOwnerJid(sock));
   if (mode === "INBOX") return !isGroupJid(msg.key?.remoteJid);
-  
   return true;
 }
 
@@ -366,37 +199,25 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
   try {
     const s = getSettings(username);
     if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg) || msg.key?.fromMe) return false;
-    
     const owner = getOwnerJid(sock);
     const sender = msg.key?.participant || msg.key?.remoteJid;
-    
     if (!owner || jidNumber(sender) === jidNumber(owner)) return false;
-    
     const media = await downloadViewOnceMedia(sock, msg);
     const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.1`;
-    
     await sendWhatsAppMedia(sock, owner, { ...media, caption });
     return true;
-  } catch (e) {
-    return false; 
-  }
+  } catch (e) { return false; }
 }
 
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg);
-  if (!q) {
-    return sock.sendMessage(msg.key.remoteJid, { text: "❌ Please reply to a View Once media with .vv" });
-  }
-  
+  if (!q) return sock.sendMessage(msg.key.remoteJid, { text: "❌ Please reply to a View Once media with .vv" });
   try {
     const media = isViewOnceMessage(q) ? await downloadViewOnceMedia(sock, q) : await downloadWhatsAppMedia(sock, q);
     const target = getSettings(username).vvTarget === "PRIVATE" ? getOwnerJid(sock) : msg.key.remoteJid;
-    
     await sendWhatsAppMedia(sock, target, media);
     await sock.sendMessage(msg.key.remoteJid, { text: "✅ View Once saved successfully." });
-  } catch (e) { 
-    await sock.sendMessage(msg.key.remoteJid, { text: `❌ .vv failed: ${e.message}` }); 
-  }
+  } catch (e) { await sock.sendMessage(msg.key.remoteJid, { text: `❌ .vv failed: ${e.message}` }); }
 }
 
 async function handleSave(sock, username, msg) {
@@ -404,19 +225,11 @@ async function handleSave(sock, username, msg) {
   try {
     const media = isViewOnceMessage(q) ? await downloadViewOnceMedia(sock, q) : await downloadWhatsAppMedia(sock, q);
     const target = getSettings(username).saveTarget === "PRIVATE" ? getOwnerJid(sock) : msg.key.remoteJid;
-    
     await sendWhatsAppMedia(sock, target, media);
-    if (target !== msg.key.remoteJid) {
-      await sock.sendMessage(msg.key.remoteJid, { text: "✅ Saved to My Inbox." });
-    }
-  } catch (e) { 
-    await sock.sendMessage(msg.key.remoteJid, { text: `❌ .save failed: ${e.message}` }); 
-  }
+    if (target !== msg.key.remoteJid) await sock.sendMessage(msg.key.remoteJid, { text: "✅ Saved to My Inbox." });
+  } catch (e) { await sock.sendMessage(msg.key.remoteJid, { text: `❌ .save failed: ${e.message}` }); }
 }
 
-// ==========================================
-// SETTINGS & MENU
-// ==========================================
 function settingsMenu(u) {
   const s = getSettings(u);
   return `⚙️ *DIMUWA BOT SETTINGS*
@@ -443,45 +256,24 @@ Auto-Save V.O. [ ${s.autoSaveViewOnce} ] (14.1 ON | 14.2 OFF)`;
 
 async function processSettingsCode(sock, u, msg, code) {
   if (!isOwner(sock, msg)) return true; 
-  
-  const s = getSettings(u); 
-  let changed = true;
-  
+  const s = getSettings(u); let changed = true;
   switch (code) {
     case "1.1": s.alwaysOnline = "ON"; await sock.sendPresenceUpdate("available"); break; 
     case "1.2": s.alwaysOnline = "OFF"; await sock.sendPresenceUpdate("unavailable"); break;
-    case "2.1": s.autoRead = "ON"; break; 
-    case "2.2": s.autoRead = "OFF"; break;
-    case "3.1": s.botMode = "PUBLIC"; break; 
-    case "3.2": s.botMode = "PRIVATE"; break; 
-    case "3.3": s.botMode = "INBOX"; break;
-    case "4.1": s.statusRead = "ON"; break; 
-    case "4.2": s.statusRead = "OFF"; break;
-    case "5.1": s.statusReact = "GREEN"; break; 
-    case "5.2": s.statusReact = "RANDOM"; break; 
-    case "5.3": s.statusReact = "OFF"; break;
-    case "7.1": s.composing = "ON"; break; 
-    case "7.2": s.composing = "OFF"; break;
-    case "9.1": s.antiDelete = "ON"; break; 
-    case "9.2": s.antiDelete = "OFF"; break;
-    case "10.1": s.antiDelTarget = "SAME"; break; 
-    case "10.2": s.antiDelTarget = "PRIVATE"; break;
-    case "11.1": s.vvTarget = "SAME"; break; 
-    case "11.2": s.vvTarget = "PRIVATE"; break;
-    case "12.1": s.saveTarget = "SAME"; break; 
-    case "12.2": s.saveTarget = "PRIVATE"; break;
-    case "13.1": s.botPower = "ON"; break; 
-    case "13.2": s.botPower = "OFF"; break;
-    case "14.1": s.autoSaveViewOnce = "ON"; break; 
-    case "14.2": s.autoSaveViewOnce = "OFF"; break;
+    case "2.1": s.autoRead = "ON"; break; case "2.2": s.autoRead = "OFF"; break;
+    case "3.1": s.botMode = "PUBLIC"; break; case "3.2": s.botMode = "PRIVATE"; break; case "3.3": s.botMode = "INBOX"; break;
+    case "4.1": s.statusRead = "ON"; break; case "4.2": s.statusRead = "OFF"; break;
+    case "5.1": s.statusReact = "GREEN"; break; case "5.2": s.statusReact = "RANDOM"; break; case "5.3": s.statusReact = "OFF"; break;
+    case "7.1": s.composing = "ON"; break; case "7.2": s.composing = "OFF"; break;
+    case "9.1": s.antiDelete = "ON"; break; case "9.2": s.antiDelete = "OFF"; break;
+    case "10.1": s.antiDelTarget = "SAME"; break; case "10.2": s.antiDelTarget = "PRIVATE"; break;
+    case "11.1": s.vvTarget = "SAME"; break; case "11.2": s.vvTarget = "PRIVATE"; break;
+    case "12.1": s.saveTarget = "SAME"; break; case "12.2": s.saveTarget = "PRIVATE"; break;
+    case "13.1": s.botPower = "ON"; break; case "13.2": s.botPower = "OFF"; break;
+    case "14.1": s.autoSaveViewOnce = "ON"; break; case "14.2": s.autoSaveViewOnce = "OFF"; break;
     default: changed = false;
   }
-  
-  if (changed) { 
-    saveSettings(u, s); 
-    await sock.sendMessage(msg.key.remoteJid, { text: "✅ SETTING UPDATED" }); 
-    return true; 
-  }
+  if (changed) { saveSettings(u, s); await sock.sendMessage(msg.key.remoteJid, { text: "✅ SETTING UPDATED" }); return true; }
   return false;
 }
 
@@ -513,86 +305,40 @@ function menuText(u) {
 }
 
 async function sendMenu(sock, u, jid, msg) {
-  try { 
-    await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption: menuText(u) }, { quoted: msg }); 
-  } catch { 
-    await sock.sendMessage(jid, { text: menuText(u) }, { quoted: msg }); 
-  }
-  
-  try { 
-    await sock.sendMessage(jid, { audio: { url: MENU_AUDIO_URL }, mimetype: "audio/mpeg", ptt: false }); 
-  } catch {}
+  try { await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption: menuText(u) }, { quoted: msg }); } 
+  catch { await sock.sendMessage(jid, { text: menuText(u) }, { quoted: msg }); }
+  try { await sock.sendMessage(jid, { audio: { url: MENU_AUDIO_URL }, mimetype: "audio/mpeg", ptt: false }); } catch {}
 }
 
 async function handleMenuNumber(sock, username, jid, num, msg) {
-  if (num === "1") {
-    await sock.sendMessage(jid, { text: `📥 *DOWNLOAD MENU*\nSimply send any TikTok, Facebook, or YouTube URL to download Video, Audio, or Images!` }, { quoted: msg });
-    return true;
-  }
-  if (num === "2") {
-    await sock.sendMessage(jid, { text: settingsMenu(username) }, { quoted: msg });
-    return true;
-  }
+  if (num === "1") { await sock.sendMessage(jid, { text: `📥 *DOWNLOAD MENU*\nSimply send any TikTok, Facebook, or YouTube URL to download Video, Audio, or Images!` }, { quoted: msg }); return true; }
+  if (num === "2") { await sock.sendMessage(jid, { text: settingsMenu(username) }, { quoted: msg }); return true; }
   if (num === "3") {
-    if (!isOwner(sock, msg)) {
-      await sock.sendMessage(jid, { text: "❌ Owner only." }, { quoted: msg });
-      return true;
-    }
-    await sock.sendMessage(jid, { text: `👑 *OWNER COMMANDS*\n.dp, .block, .unblock` }, { quoted: msg });
-    return true;
+    if (!isOwner(sock, msg)) { await sock.sendMessage(jid, { text: "❌ Owner only." }, { quoted: msg }); return true; }
+    await sock.sendMessage(jid, { text: `👑 *OWNER COMMANDS*\n.dp, .block, .unblock` }, { quoted: msg }); return true;
   }
-  if (num === "4") {
-    await sock.sendMessage(jid, { text: `🛠️ *UTILITY*\n.vv - View once resend\n.save - Save media` }, { quoted: msg });
-    return true;
-  }
-  if (num === "5") {
-    await sock.sendMessage(jid, { text: `🎮 *FUN COMMANDS*\n.dice\n.random\n.love` }, { quoted: msg });
-    return true;
-  }
-  if (num === "6") {
-    await sock.sendMessage(jid, { text: `👥 *GROUP COMMANDS*\n.tagall - Mention all` }, { quoted: msg });
-    return true;
-  }
-  if (num === "7") {
-    await sock.sendMessage(jid, { text: `👤 *NORMAL USER COMMANDS*\n.ping - Check speed\n.alive - Check status\n.menu - Bot Menu\n.status - Bot Info\n.vv - Save view once\n.save - Save media\n.tagall - Tag group\n.dice / .random / .love\n\nSend video links to download Video, Audio, or Images!` }, { quoted: msg });
-    return true;
-  }
+  if (num === "4") { await sock.sendMessage(jid, { text: `🛠️ *UTILITY*\n.vv - View once resend\n.save - Save media` }, { quoted: msg }); return true; }
+  if (num === "5") { await sock.sendMessage(jid, { text: `🎮 *FUN COMMANDS*\n.dice\n.random\n.love` }, { quoted: msg }); return true; }
+  if (num === "6") { await sock.sendMessage(jid, { text: `👥 *GROUP COMMANDS*\n.tagall - Mention all` }, { quoted: msg }); return true; }
+  if (num === "7") { await sock.sendMessage(jid, { text: `👤 *NORMAL USER COMMANDS*\n.ping - Check speed\n.alive - Check status\n.menu - Bot Menu\n.status - Bot Info\n.vv - Save view once\n.save - Save media\n.tagall - Tag group\n.dice / .random / .love\n\nSend video links to download Video, Audio, or Images!` }, { quoted: msg }); return true; }
   return false;
 }
 
-// ==========================================
-// YT-DLP DOWNLOADER (INTERACTIVE)
-// ==========================================
-function extractHttpUrl(t) { 
-  const m = t?.match(/https?:\/\/[^\s]+/i); 
-  return m ? m[0].replace(/[)>]+$/g, "") : null; 
-}
-
-function isSupportedUrl(url) { 
-  return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); 
-}
+function extractHttpUrl(t) { const m = t?.match(/https?:\/\/[^\s]+/i); return m ? m[0].replace(/[)>]+$/g, "") : null; }
+function isSupportedUrl(url) { return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); }
 
 async function ensureYtDlp() {
   const binary = path.join(TOOLS_DIR, "yt-dlp");
   if (fs.existsSync(binary)) return binary;
-  
   const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux${process.arch === "arm64" ? "_aarch64" : ""}`;
-  
   await new Promise((resolve, reject) => {
     https.get(url, { headers: { "User-Agent": "DIMUWA-MINI-BOT" } }, response => {
       if (response.statusCode === 302) {
-        return https.get(response.headers.location, res2 => { 
-          const f = fs.createWriteStream(binary); 
-          res2.pipe(f); 
-          f.on("finish", resolve); 
-        }).on("error", reject);
+        return https.get(response.headers.location, res2 => { const f = fs.createWriteStream(binary); res2.pipe(f); f.on("finish", resolve); }).on("error", reject);
       }
-      const f = fs.createWriteStream(binary); 
-      response.pipe(f); 
-      f.on("finish", resolve);
+      const f = fs.createWriteStream(binary); response.pipe(f); f.on("finish", resolve);
     }).on("error", reject);
   });
-  
   await fsp.chmod(binary, 0o755);
   return binary;
 }
@@ -601,42 +347,23 @@ async function downloadSocialMedia(username, url, type) {
   const ytDlp = await ensureYtDlp();
   const jobId = crypto.randomBytes(8).toString("hex");
   const outputTemplate = path.join(MEDIA_DIR, `${jobId}.%(ext)s`);
-  
   const formatArgs = type === "audio" 
       ? ["-f", "bestaudio", "--extract-audio", "--audio-format", "mp3"] 
       : ["-f", /youtube|facebook|fb\./i.test(url) ? "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" : "best", ...(type==="video" && /youtube|facebook/i.test(url) ? ["--merge-output-format", "mp4"] : [])];
-      
-  const args = [
-    "--no-warnings", 
-    "--restrict-filenames", 
-    "--geo-bypass", 
-    "--no-check-certificates", 
-    "--max-filesize", "100M", 
-    ...formatArgs, 
-    "-o", outputTemplate, 
-    "--print", "after_move:filepath", 
-    url
-  ];
-  
+  const args = ["--no-warnings", "--restrict-filenames", "--geo-bypass", "--no-check-certificates", "--max-filesize", "100M", ...formatArgs, "-o", outputTemplate, "--print", "after_move:filepath", url];
   try {
     const res = await execFileAsync(ytDlp, args, { timeout: 180000 });
     const file = res.stdout.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).pop();
-    
     if (file && fs.existsSync(file)) return file;
-    
     const fallback = (await fsp.readdir(MEDIA_DIR)).find(x => x.startsWith(jobId));
     if (fallback) return path.join(MEDIA_DIR, fallback);
-    
     throw new Error("File not found");
-  } catch (e) { 
-    throw new Error("Download failed or media is private."); 
-  }
+  } catch (e) { throw new Error("Download failed or media is private."); }
 }
 
 async function executeDownload(sock, username, msg, url, type) {
   try {
     await sock.sendMessage(msg.key.remoteJid, { text: `⏳ Downloading ${type.toUpperCase()}...\nPlease wait.` }, { quoted: msg });
-    
     const dlType = type === "audio" ? "audio" : "video";
     const file = await downloadSocialMedia(username, url, dlType);
     const ext = path.extname(file).toLowerCase();
@@ -644,69 +371,38 @@ async function executeDownload(sock, username, msg, url, type) {
     if (type === "audio" || ['.mp3', '.m4a', '.aac'].includes(ext)) {
       await sock.sendMessage(msg.key.remoteJid, { audio: await fsp.readFile(file), mimetype: "audio/mpeg" }, { quoted: msg });
     } else if (type === "image" || ['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
-      try {
-        await sock.sendMessage(msg.key.remoteJid, { image: await fsp.readFile(file), caption: "✅ DIMUWA IMAGE" }, { quoted: msg });
-      } catch {
-        await sock.sendMessage(msg.key.remoteJid, { video: await fsp.readFile(file), caption: "✅ DIMUWA MEDIA" }, { quoted: msg });
-      }
+      try { await sock.sendMessage(msg.key.remoteJid, { image: await fsp.readFile(file), caption: "✅ DIMUWA IMAGE" }, { quoted: msg }); } 
+      catch { await sock.sendMessage(msg.key.remoteJid, { video: await fsp.readFile(file), caption: "✅ DIMUWA MEDIA" }, { quoted: msg }); }
     } else {
       await sock.sendMessage(msg.key.remoteJid, { video: await fsp.readFile(file), mimetype: "video/mp4", caption: "✅ DIMUWA VIDEO" }, { quoted: msg });
     }
-    
     await fsp.unlink(file).catch(()=>{});
     incrementStat(username, "downloads");
-  } catch (e) {
-    await sock.sendMessage(msg.key.remoteJid, { text: `❌ Download failed: ${e.message}` }, { quoted: msg });
-  }
+  } catch (e) { await sock.sendMessage(msg.key.remoteJid, { text: `❌ Download failed: ${e.message}` }, { quoted: msg }); }
 }
 
-// ==========================================
-// ANTI-DELETE HANDLER
-// ==========================================
 async function handleDeletedMessages(username, sock, deletedKeys) {
   const s = getSettings(username);
   if (s.antiDelete !== "ON" || !Array.isArray(deletedKeys)) return;
-  
   for (const key of deletedKeys) {
     try {
       const cached = getCachedMessage(key);
       if (!cached) continue;
-      
       const target = s.antiDelTarget === "PRIVATE" ? getOwnerJid(sock) : key.remoteJid;
       if (!target) continue;
-      
-      const t = getMessageText(cached); 
-      const media = getMediaInfo(cached.message);
-      
+      const t = getMessageText(cached); const media = getMediaInfo(cached.message);
       if (media) {
-        try { 
-          const dm = await downloadWhatsAppMedia(sock, cached); 
-          await sendWhatsAppMedia(sock, target, { ...dm, content: { caption: `🗑️ DELETED MEDIA\n${dm.content?.caption||""}` } }); 
-        } catch { 
-          await sock.sendMessage(target, { text: `🗑️ DELETED MEDIA` }); 
-        }
-      } else if (t) { 
-        await sock.sendMessage(target, { text: `🗑️ DELETED MSG:\n\n${t}` }); 
-      } else { 
-        await sock.sendMessage(target, { forward: cached }); 
-      }
-    } catch (e) {
-      // Ignore errors silently
-    }
+        try { const dm = await downloadWhatsAppMedia(sock, cached); await sendWhatsAppMedia(sock, target, { ...dm, content: { caption: `🗑️ DELETED MEDIA\n${dm.content?.caption||""}` } }); } 
+        catch { await sock.sendMessage(target, { text: `🗑️ DELETED MEDIA` }); }
+      } else if (t) { await sock.sendMessage(target, { text: `🗑️ DELETED MSG:\n\n${t}` }); } 
+      else { await sock.sendMessage(target, { forward: cached }); }
+    } catch (e) {}
   }
 }
 
-// ==========================================
-// MAIN MESSAGE ROUTER
-// ==========================================
 async function handleMessage(username, sock, msg) {
   if (!msg?.message || !msg?.key) return;
-  
-  if (msg.key.remoteJid === "status@broadcast") {
-    await handleStatus(username, sock, msg);
-    return;
-  }
-  
+  if (msg.key.remoteJid === "status@broadcast") { await handleStatus(username, sock, msg); return; }
   if (msg.key.remoteJid === "broadcast") return;
 
   if (msg.message.protocolMessage && (msg.message.protocolMessage.type === 0 || msg.message.protocolMessage.type === "REVOKE")) {
@@ -715,39 +411,19 @@ async function handleMessage(username, sock, msg) {
     return;
   }
   
-  cacheMessage(msg); 
-  incrementStat(username, "messages");
-  
+  cacheMessage(msg); incrementStat(username, "messages");
   const s = getSettings(username);
-  
-  if (s.autoRead === "ON" && !msg.key.fromMe) {
-    await sock.readMessages([msg.key]).catch(()=>{});
-  }
-  
+  if (s.autoRead === "ON" && !msg.key.fromMe) { await sock.readMessages([msg.key]).catch(()=>{}); }
   await handleAutoSaveViewOnce(username, sock, msg);
 
-  const text = getMessageText(msg).trim(); 
-  if (!text) return;
-  
+  const text = getMessageText(msg).trim(); if (!text) return;
   const setCode = text.match(/^\s*(\d{1,2}\.\d)\s*$/);
-  if (setCode) {
-    return await processSettingsCode(sock, username, msg, setCode[1]);
-  }
+  if (setCode) { return await processSettingsCode(sock, username, msg, setCode[1]); }
   
-  if (/^[1-7]$/.test(text)) {
-    const handledMenu = await handleMenuNumber(sock, username, msg.key.remoteJid, text, msg);
-    if (handledMenu) return; 
-  }
-  
+  if (/^[1-7]$/.test(text)) { const handledMenu = await handleMenuNumber(sock, username, msg.key.remoteJid, text, msg); if (handledMenu) return; }
   if (!canProcessMessage(sock, username, msg)) return;
+  if (s.composing === "ON") { await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{}); }
   
-  if (s.composing === "ON") {
-    await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{});
-  }
-  
-  // ----------------------------------------------------
-  // Interactive Downloader Reply Check
-  // ----------------------------------------------------
   const quoted = getQuotedMessage(msg);
   if (quoted) {
     const qText = getMessageText(quoted);
@@ -770,9 +446,6 @@ async function handleMessage(username, sock, msg) {
   if (cmd === ".vv" || cmd === ".viewonce") return await handleViewOnce(sock, username, msg);
   if (cmd === ".save") return await handleSave(sock, username, msg);
   
-  // ----------------------------------------------------
-  // Trigger Interactive Downloader Menu
-  // ----------------------------------------------------
   const urlMatches = text.match(/https?:\/\/[^\s]+/i);
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
@@ -782,13 +455,24 @@ async function handleMessage(username, sock, msg) {
       return; 
     }
   }
-  
   await sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(()=>{});
 }
 
-// ==========================================
-// BOT CONNECTION (BAILEYS)
-// ==========================================
+// Fixed Wait Logic: Prevents indefinite hangs and forcefully clears corrupt data
+async function waitForSocketReady(sock, timeout = 40000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (isConnected(sock)) return true;
+    if (sock?.__qrReady) return true;
+    
+    const readyState = sock?.ws?.readyState;
+    if (readyState === 3) return false; 
+    
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  return isConnected(sock) || !!sock?.__qrReady;
+}
+
 async function startBot(username, opts = {}) {
   const clean = cleanUsername(username);
   if (bots.has(clean)) return bots.get(clean);
@@ -815,36 +499,23 @@ async function startBot(username, opts = {}) {
       getMessage: async (k) => (getCachedMessage(k) || { conversation: "DIMUWA" })
     });
     
-    sock.__d = clean; 
-    bots.set(clean, sock); 
-    getSettings(clean); 
-    getStats(clean);
-    
+    sock.__d = clean; bots.set(clean, sock); getSettings(clean); getStats(clean);
     sock.ev.on("creds.update", saveCreds);
     
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) {
         sock.__qrReady = true;
-        try { 
-          qrStore.set(clean, await QRCode.toDataURL(qr, { margin: 2, width: 500 })); 
-        } catch {}
+        try { qrStore.set(clean, await QRCode.toDataURL(qr, { margin: 2, width: 500 })); } catch {}
       }
-      
       if (connection === "open") {
-        qrStore.delete(clean); 
-        pairingStore.delete(clean);
-        getStats(clean).connectedAt = Date.now(); 
-        saveStats();
+        qrStore.delete(clean); pairingStore.delete(clean);
+        getStats(clean).connectedAt = Date.now(); saveStats();
         
         const s = getSettings(clean);
-        if (s.alwaysOnline === "ON") {
-          await sock.sendPresenceUpdate("available").catch(()=>{});
-        } else {
-          await sock.sendPresenceUpdate("unavailable").catch(()=>{});
-        }
+        if (s.alwaysOnline === "ON") await sock.sendPresenceUpdate("available").catch(()=>{});
+        else await sock.sendPresenceUpdate("unavailable").catch(()=>{});
       }
-      
       if (connection === "close") {
         bots.delete(clean);
         const code = lastDisconnect?.error?.output?.statusCode;
@@ -870,186 +541,102 @@ async function startBot(username, opts = {}) {
   })();
   
   startingBots.set(clean, promise);
-  try { 
-    return await promise; 
-  } finally { 
-    startingBots.delete(clean); 
-  }
-}
-
-// ==========================================
-// PAIRING CODE GENERATION (FIXED WAITING)
-// ==========================================
-async function waitForSocketReady(sock, timeout = 30000) {
-  const started = Date.now();
-  while (Date.now() - started < timeout) {
-    if (isConnected(sock)) return true;
-    if (sock?.__qrReady) return true;
-    
-    const readyState = sock?.ws?.readyState;
-    if (readyState === 3) return false; // Connection closed
-    
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-  return isConnected(sock) || !!sock?.__qrReady;
+  try { return await promise; } finally { startingBots.delete(clean); }
 }
 
 async function getPairingCode(username, phone) {
-  const clean = cleanUsername(username); 
-  const number = normalizePhone(phone);
+  const clean = cleanUsername(username); const number = normalizePhone(phone);
+  if (!number || number.length < 8) throw new Error("Please enter a valid WhatsApp number.");
   
-  if (!number || number.length < 8) {
-    throw new Error("Please enter a valid WhatsApp number.");
-  }
-  
-  let sock = bots.get(clean); 
-  if (!sock) sock = await startBot(clean);
-  
+  let sock = bots.get(clean); if (!sock) sock = await startBot(clean);
   if (isConnected(sock)) return { connected: true };
   
-  // Check cache to prevent spamming WhatsApp API
   const cached = pairingStore.get(clean);
-  if (cached && cached.number === number && Date.now() - cached.time < 45000) {
-      return { connected: false, code: cached.code };
-  }
+  if (cached && cached.number === number && Date.now() - cached.time < 45000) return { connected: false, code: cached.code };
 
   if (sock.__pairingRequest) return await sock.__pairingRequest;
   
   sock.__pairingRequest = (async () => {
     try {
-      // FIXED: Dynamic wait for socket to be ready (up to 25 seconds)
-      const ready = await waitForSocketReady(sock, 25000);
-      
+      const ready = await waitForSocketReady(sock, 40000);
       if (isConnected(sock)) return { connected: true };
+      
+      // Auto-Reset stuck session data
       if (!ready) {
-        throw new Error("Bot is starting up. Please try again in 10 seconds.");
+        bots.delete(clean);
+        await fsp.rm(sessionPath(clean), { recursive: true, force: true }).catch(()=>{});
+        throw new Error("Server took too long. Session has been reset. Please click 'Get Pairing Code' again.");
       }
       
       const rawCode = await sock.requestPairingCode(number);
       const code = String(rawCode || "").replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g)?.join("-");
+      if (!code) throw new Error("Code not generated. Try again.");
       
-      if (!code) throw new Error("Code not generated");
-      
-      // Store in cache
       pairingStore.set(clean, { number, code, time: Date.now() });
-      
       return { connected: false, code };
     } catch (e) { 
-      throw new Error(e.message || "Please wait a few seconds and try again."); 
+      throw new Error(e.message || "Failed. Please try again."); 
     }
   })();
-  
-  try { 
-    return await sock.__pairingRequest; 
-  } finally { 
-    sock.__pairingRequest = null; 
-  }
+  try { return await sock.__pairingRequest; } finally { sock.__pairingRequest = null; }
 }
 
-// ==========================================
-// EXPRESS DASHBOARD API
-// ==========================================
 app.get("/get-pairing-code", async (req, res) => {
-  try { 
-    res.json({ ok: true, ...(await getPairingCode(req.query.username, req.query.phone)) }); 
-  } catch (e) { 
-    res.status(500).json({ ok: false, error: e.message }); 
-  }
+  try { res.json({ ok: true, ...(await getPairingCode(req.query.username, req.query.phone)) }); } 
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get("/qr", async (req, res) => {
   try {
-    const u = cleanUsername(req.query.username); 
-    let s = bots.get(u);
-    
-    if (!s && !startingBots.has(u)) { 
-      qrStore.delete(u); 
-      s = await startBot(u); 
-    } else if (!s) {
-      s = await startBot(u);
-    }
-    
+    const u = cleanUsername(req.query.username); let s = bots.get(u);
+    if (!s && !startingBots.has(u)) { qrStore.delete(u); s = await startBot(u); } else if (!s) s = await startBot(u);
     if (isConnected(s)) return res.json({ ok: true, connected: true });
     
     let qr = null; 
-    for(let i=0; i<50; i++) { 
-      if(qrStore.has(u)) { 
-        qr = qrStore.get(u); 
-        break; 
-      } 
+    for(let i=0; i<80; i++) { 
+      if(qrStore.has(u)) { qr = qrStore.get(u); break; } 
       await new Promise(r => setTimeout(r, 500)); 
     }
     
-    if (!qr) throw new Error("QR not ready");
+    // Auto-Reset stuck session data
+    if (!qr) {
+      bots.delete(u);
+      await fsp.rm(sessionPath(u), { recursive: true, force: true }).catch(()=>{});
+      throw new Error("QR Timeout. Session reset. Try again.");
+    }
     res.json({ ok: true, qr });
-  } catch (e) { 
-    res.status(503).json({ ok: false, error: e.message }); 
-  }
+  } catch (e) { res.status(503).json({ ok: false, error: e.message }); }
 });
 
 app.get("/details", async (req, res) => { 
-  const u = cleanUsername(req.query.username); 
-  const s = bots.get(u); 
-  res.json({ 
-    ok: true, 
-    connected: isConnected(s), 
-    bot: {
-      status: isConnected(s) ? "CONNECTED" : "OFFLINE", 
-      username: u, 
-      phone: jidNumber(s?.user?.id), 
-      connectedAt: getStats(u).connectedAt
-    } 
-  }); 
+  const u = cleanUsername(req.query.username); const s = bots.get(u); 
+  res.json({ ok: true, connected: isConnected(s), bot: { status: isConnected(s) ? "CONNECTED" : "OFFLINE", username: u, phone: jidNumber(s?.user?.id), connectedAt: getStats(u).connectedAt } }); 
 });
 
 app.get("/stats", async (req, res) => { 
-  const u = cleanUsername(req.query.username); 
-  const s = getStats(u); 
-  res.json({
-    ok: true, 
-    stats: {
-      ...s, 
-      uptime: s.connectedAt ? Math.max(0, Math.floor((Date.now() - s.connectedAt) / 1000)) : 0
-    } 
-  }); 
+  const u = cleanUsername(req.query.username); const s = getStats(u); 
+  res.json({ ok: true, stats: { ...s, uptime: s.connectedAt ? Math.max(0, Math.floor((Date.now() - s.connectedAt) / 1000)) : 0 } }); 
 });
 
-app.get("/settings", async (req, res) => { 
-  res.json({ ok: true, settings: getSettings(req.query.username) }); 
-});
+app.get("/settings", async (req, res) => { res.json({ ok: true, settings: getSettings(req.query.username) }); });
 
 app.post("/logout", async (req, res) => { 
-  const u = cleanUsername(req.query.username); 
-  const s = bots.get(u); 
-  if (s) {
-    try { await s.logout(); } catch {}
-  }
-  bots.delete(u); 
-  fsp.rm(sessionPath(u), { recursive: true, force: true }); 
-  res.json({ ok: true }); 
+  const u = cleanUsername(req.query.username); const s = bots.get(u); 
+  if (s) { try { await s.logout(); } catch {} } 
+  bots.delete(u); fsp.rm(sessionPath(u), { recursive: true, force: true }); res.json({ ok: true }); 
 });
 
 app.post("/unlink", async (req, res) => { 
-  const u = cleanUsername(req.query.username); 
-  const s = bots.get(u); 
-  if (s) {
-    try { await s.logout(); } catch {}
-  }
-  bots.delete(u); 
-  fsp.rm(sessionPath(u), { recursive: true, force: true }); 
-  res.json({ ok: true }); 
+  const u = cleanUsername(req.query.username); const s = bots.get(u); 
+  if (s) { try { await s.logout(); } catch {} } 
+  bots.delete(u); fsp.rm(sessionPath(u), { recursive: true, force: true }).catch(()=>{}); res.json({ ok: true }); 
 });
 
-// ==========================================
-// START SERVER
-// ==========================================
 app.listen(PORT, "0.0.0.0", () => logger.info(`Server started on ${PORT}`));
 
 (async () => {
   if (!fs.existsSync(SESSION_DIR)) return;
   for (const f of await fsp.readdir(SESSION_DIR, { withFileTypes: true })) {
-    if (f.isDirectory() && f.name.startsWith("session_")) {
-      await startBot(f.name.replace("session_", "")).catch(() => {});
-    }
+    if (f.isDirectory() && f.name.startsWith("session_")) await startBot(f.name.replace("session_", "")).catch(() => {});
   }
 })();
