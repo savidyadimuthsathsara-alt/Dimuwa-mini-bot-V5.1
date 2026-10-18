@@ -9,7 +9,6 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
     
-    /* Live Background Styling */
     body {
       min-height: 100vh;
       font-family: Inter, Arial, Helvetica, sans-serif;
@@ -18,61 +17,26 @@
       overflow-x: hidden;
     }
     
-    #bg-canvas {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      z-index: -1;
-      background: linear-gradient(to bottom, #020204, #0a0a12);
-    }
-
+    #bg-canvas { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: -1; background: linear-gradient(to bottom, #020204, #0a0a12); }
     button, input { font: inherit; }
     button { cursor: pointer; }
     .container { width: min(1180px, calc(100% - 30px)); margin: auto; position: relative; z-index: 1; }
     
-    /* Glassmorphism Header */
-    header {
-      position: sticky; top: 0; z-index: 1000;
-      backdrop-filter: blur(15px);
-      background: rgba(5, 5, 10, 0.4);
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
-    }
-    
+    header { position: sticky; top: 0; z-index: 1000; backdrop-filter: blur(15px); background: rgba(5, 5, 10, 0.4); border-bottom: 1px solid rgba(255,255,255,0.05); box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5); }
     .nav { min-height: 75px; display: flex; align-items: center; justify-content: space-between; gap: 15px; }
     .brand { display: flex; align-items: center; gap: 12px; }
-    .brand img {
-      width: 48px; height: 48px; border-radius: 12px; object-fit: cover;
-      border: 1px solid rgba(255,255,255,0.2); 
-      box-shadow: 0 0 15px rgba(255, 45, 85, 0.6);
-      animation: pulseGlow 2s infinite alternate;
-    }
-    
-    @keyframes pulseGlow {
-      from { box-shadow: 0 0 10px rgba(255, 45, 85, 0.4); }
-      to { box-shadow: 0 0 25px rgba(255, 45, 85, 0.9); }
-    }
-
+    .brand img { width: 48px; height: 48px; border-radius: 12px; object-fit: cover; border: 1px solid rgba(255,255,255,0.2); box-shadow: 0 0 15px rgba(255, 45, 85, 0.6); animation: pulseGlow 2s infinite alternate; }
+    @keyframes pulseGlow { from { box-shadow: 0 0 10px rgba(255, 45, 85, 0.4); } to { box-shadow: 0 0 25px rgba(255, 45, 85, 0.9); } }
     .brand-title { font-size: 19px; font-weight: 900; letter-spacing: 1px; color: #fff; }
     .brand-sub { font-size: 11px; color: #ff2d55; margin-top: 2px; text-transform: uppercase; letter-spacing: 1px; font-weight: bold;}
     
     .online-badge { display: flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: 999px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); font-size: 11px; font-weight: 700; color: #ddd; backdrop-filter: blur(5px);}
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
     .dot.online { background: #00ff88; box-shadow: 0 0 12px #00ff88; animation: blink 1.5s infinite; }
-    
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
     .hero { padding: 50px 0 30px; }
-    .hero-card {
-      position: relative; overflow: hidden; padding: 40px; border-radius: 24px;
-      background: rgba(20, 20, 25, 0.4);
-      border: 1px solid rgba(255, 255, 255, 0.1); 
-      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
-      backdrop-filter: blur(12px);
-    }
-    
+    .hero-card { position: relative; overflow: hidden; padding: 40px; border-radius: 24px; background: rgba(20, 20, 25, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 20px 60px rgba(0,0,0,0.6); backdrop-filter: blur(12px); }
     .hero h1 { font-size: clamp(28px, 5vw, 50px); font-weight: 900; letter-spacing: -1px; }
     .hero h1 span { color: #ff2d55; text-shadow: 0 0 15px rgba(255, 45, 85, 0.5); }
     .hero p { margin-top: 15px; color: #b0b0c0; font-size: 14px; max-width: 600px; line-height: 1.6; }
@@ -84,8 +48,6 @@
     .section-title span { color: #888; font-size: 12px; }
     
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
-    
-    /* Transparent Cards */
     .card { background: rgba(15, 15, 20, 0.45); border: 1px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 25px; box-shadow: 0 10px 30px rgba(0,0,0,0.4); transition: 0.3s; backdrop-filter: blur(12px);}
     .card:hover { transform: translateY(-5px); border-color: rgba(255,45,85,0.5); box-shadow: 0 15px 40px rgba(255,45,85,0.2);}
     .card h3 { font-size: 16px; margin-bottom: 10px; color: #fff; text-shadow: 0 0 5px rgba(255,255,255,0.3);}
@@ -107,14 +69,14 @@
     
     .pairing-box { margin-top: 20px; min-height: 90px; padding: 20px; border-radius: 16px; background: rgba(0,0,0,0.5); border: 1px dashed rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center; flex-direction: column;}
     .pairing-code { font-size: 32px; letter-spacing: 8px; font-weight: 900; color: #ff2d55; text-shadow: 0 0 25px rgba(255,45,85,0.7); }
-    .empty { color: #888; font-size: 12px; text-align: center; }
+    .empty { color: #ff2d55; font-size: 12px; text-align: center; } /* Error text colored red */
+    .normal-text { color: #888; font-size: 12px; text-align: center; }
     
     .qr-box { display: none; margin-top: 20px; text-align: center; }
-    .qr-box img { width: min(240px, 100%); background: white; padding: 15px; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.6);}
+    .qr-box img { width: min(240px, 100%); background: white; padding: 15px; border-radius: 20px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); display: none;} /* Hidden until loaded */
     
     .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 15px; }
     .stat { padding: 20px; border-radius: 20px; background: rgba(15, 15, 20, 0.45); border: 1px solid rgba(255,255,255,0.08); text-align: center; transition: 0.3s; backdrop-filter: blur(12px);}
-    .stat:hover { background: rgba(255,255,255,0.08); transform: translateY(-5px); border-color: rgba(255,255,255,0.3);}
     .stat-label { font-size: 11px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
     .stat-value { font-size: 28px; font-weight: 900; margin-top: 10px; color: #fff; text-shadow: 0 0 15px rgba(255,255,255,0.4);}
     
@@ -145,7 +107,6 @@
 </head>
 <body>
 
-<!-- Live Animated Background Canvas -->
 <canvas id="bg-canvas"></canvas>
 
 <header>
@@ -193,7 +154,7 @@
         <button class="btn" onclick="copyPairingCode()">📋 COPY CODE</button>
       </div>
       <div class="pairing-box">
-        <div id="pairingResult" class="empty">Pairing code will appear here.</div>
+        <div id="pairingResult" class="normal-text">Pairing code will appear here.</div>
       </div>
     </div>
     <div class="card">
@@ -241,7 +202,7 @@
     <div class="button-row">
       <button class="btn success" onclick="loadAll()">🔄 REFRESH BOT</button>
       <button class="btn danger" onclick="logoutBot()">🚪 LOGOUT</button>
-      <button class="btn warning" onclick="unlinkBot()">🔗 UNLINK</button>
+      <button class="btn warning" onclick="unlinkBot()">🔗 UNLINK (Reset Session)</button>
     </div>
   </div>
 </section>
@@ -269,56 +230,37 @@
   const canvas = document.getElementById('bg-canvas');
   const ctx = canvas.getContext('2d');
   let width, height, particles;
-
   function initCanvas() {
     width = canvas.width = window.innerWidth;
     height = canvas.height = window.innerHeight;
     particles = [];
     for (let i = 0; i < (window.innerWidth < 768 ? 40 : 80); i++) {
-      particles.push({
-        x: Math.random() * width,
-        y: Math.random() * height,
-        vx: (Math.random() - 0.5) * 0.8,
-        vy: (Math.random() - 0.5) * 0.8,
-        size: Math.random() * 2 + 1
-      });
+      particles.push({ x: Math.random() * width, y: Math.random() * height, vx: (Math.random() - 0.5) * 0.8, vy: (Math.random() - 0.5) * 0.8, size: Math.random() * 2 + 1 });
     }
   }
-
   function drawCanvas() {
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = 'rgba(255, 45, 85, 0.6)';
     ctx.lineWidth = 0.5;
-
     for (let i = 0; i < particles.length; i++) {
       let p = particles[i];
       p.x += p.vx; p.y += p.vy;
-      
       if (p.x < 0 || p.x > width) p.vx *= -1;
       if (p.y < 0 || p.y > height) p.vy *= -1;
-
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-      ctx.fill();
-
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
       for (let j = i + 1; j < particles.length; j++) {
         let p2 = particles[j];
         let dist = Math.sqrt((p.x - p2.x) ** 2 + (p.y - p2.y) ** 2);
         if (dist < 120) {
           ctx.strokeStyle = `rgba(255, 45, 85, ${1 - dist/120})`;
-          ctx.beginPath();
-          ctx.moveTo(p.x, p.y);
-          ctx.lineTo(p2.x, p2.y);
-          ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
         }
       }
     }
     requestAnimationFrame(drawCanvas);
   }
-
   window.addEventListener('resize', initCanvas);
-  initCanvas();
-  drawCanvas();
+  initCanvas(); drawCanvas();
 </script>
 
 <!-- Bot Logic Script -->
@@ -330,28 +272,32 @@
     const box = $("toast"); box.textContent = msg; box.className = "show " + type;
     clearTimeout(window.__t); window.__t = setTimeout(() => box.className = "", 3000);
   }
+  
   async function api(url, opts = {}) {
     const res = await fetch(url, { ...opts, headers: { "Content-Type": "application/json", ...(opts.headers||{}) }});
     const data = await res.json().catch(()=>({}));
     if(!res.ok) throw new Error(data.error || "Request failed");
     return data;
   }
+  
   function getU() { const v = $("username").value.trim(); if(!v) {toast("Enter username", "error"); return null;} localStorage.setItem("d_u", v); return v; }
   function getP() { const v = $("phone").value.trim().replace(/\D/g,""); if(!v) {toast("Enter phone", "error"); return null;} return v; }
   
   async function getPairingCode() {
     const u = getU(); const p = getP(); if(!u || !p) return;
     const btn = $("pairBtn"); btn.disabled = true; btn.innerHTML = `<div class="spinner"></div> REQUESTING...`;
-    $("pairingResult").innerHTML = `<div class="empty">Requesting code...</div>`;
+    $("pairingResult").innerHTML = `<div class="normal-text">Connecting to Server. Please wait...</div>`;
+    
     try {
       const d = await api(`/get-pairing-code?username=${u}&phone=${p}`);
+      if(d.connected) { toast("Already connected", "success"); loadAll(); return; }
       const code = d.code; lastPairingCode = code;
-      if(!code) throw new Error(d.message || "Code not generated");
-      $("pairingResult").innerHTML = `<div class="pairing-code">${code}</div><div class="empty">Enter this in WhatsApp Linked Devices</div>`;
+      
+      $("pairingResult").innerHTML = `<div class="pairing-code">${code}</div><div class="normal-text">Enter this in WhatsApp Linked Devices</div>`;
       toast("Pairing code ready", "success");
       loadAll();
     } catch(e) {
-      $("pairingResult").innerHTML = `<div class="empty" style="color:#ff2d55">${e.message}</div>`;
+      $("pairingResult").innerHTML = `<div class="empty">${e.message}</div>`;
       toast(e.message, "error");
     } finally { btn.disabled = false; btn.textContent = "🔐 GET PAIRING CODE"; }
   }
@@ -364,28 +310,43 @@
   async function getQR() {
     const u = getU(); if(!u) return;
     const btn = $("qrBtn"); btn.disabled = true; btn.innerHTML = `<div class="spinner"></div> LOADING...`;
-    $("qrBox").style.display = "block"; $("qrStatus").textContent = "Requesting...";
+    $("qrBox").style.display = "block"; 
+    $("qrStatus").textContent = "Requesting...";
+    $("qrImage").style.display = "none"; // Hide broken image while loading
+    
     try {
       const d = await api(`/qr?username=${u}`);
       if(d.connected) { toast("Already connected", "success"); loadAll(); return; }
+      
       $("qrImage").src = d.qr.startsWith("data:") ? d.qr : `data:image/png;base64,${d.qr}`;
+      $("qrImage").style.display = "inline-block";
       $("qrStatus").textContent = "Scan using WhatsApp"; toast("QR ready", "success");
-    } catch(e) { $("qrStatus").textContent = e.message; toast(e.message, "error"); } 
-    finally { btn.disabled = false; btn.textContent = "📷 GET QR CODE"; }
+    } catch(e) { 
+      $("qrStatus").textContent = e.message; 
+      toast(e.message, "error"); 
+    } finally { 
+      btn.disabled = false; btn.textContent = "📷 GET QR CODE"; 
+    }
   }
+  
   function hideQR() { $("qrBox").style.display = "none"; }
 
   async function loadDetails() {
     const u = $("username").value.trim() || localStorage.getItem("d_u"); if(!u) return;
     try {
       const d = await api(`/details?username=${u}`); const b = d.bot || d;
-      $("detailStatus").textContent = b.status || b.connected ? "CONNECTED" : "OFFLINE";
+      
+      // FIXED UI BUG: Properly checks if status is explicitly CONNECTED
+      const isConnected = b.status === "CONNECTED" || b.connected === true;
+      
+      $("detailStatus").textContent = isConnected ? "CONNECTED" : "OFFLINE";
       $("detailUsername").textContent = b.username || u;
       $("detailPhone").textContent = b.phone || "-";
       $("detailName").textContent = b.pushName || "-";
       $("detailJid").textContent = b.jid || "-";
       $("detailSince").textContent = b.connectedAt ? new Date(b.connectedAt).toLocaleString() : "-";
-      updateUI(b.connected === true || String(b.status).toLowerCase() === "connected");
+      
+      updateUI(isConnected);
     } catch(e) { updateUI(false); }
   }
 
@@ -415,9 +376,10 @@
     const u = getU(); if(!u || !confirm("Logout bot?")) return;
     try { await api(`/logout?username=${u}`, {method:"POST"}); toast("Logged out", "success"); updateUI(false); loadAll(); } catch(e) { toast(e.message, "error"); }
   }
+  
   async function unlinkBot() {
-    const u = getU(); if(!u || !confirm("Unlink session?")) return;
-    try { await api(`/unlink?username=${u}`, {method:"POST"}); toast("Unlinked", "success"); updateUI(false); loadAll(); } catch(e) { toast(e.message, "error"); }
+    const u = getU(); if(!u || !confirm("Unlink and Reset Session?")) return;
+    try { await api(`/unlink?username=${u}`, {method:"POST"}); toast("Unlinked & Reset", "success"); updateUI(false); loadAll(); } catch(e) { toast(e.message, "error"); }
   }
 
   function updateUI(on) {
