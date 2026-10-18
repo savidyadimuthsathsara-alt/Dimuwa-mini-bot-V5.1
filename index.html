@@ -1,0 +1,2368 @@
+<!DOCTYPE html>  <html lang="en">  
+<head>  
+  <meta charset="UTF-8">  <meta
+name="viewport"
+content="width=device-width, initial-scale=1.0, maximum-scale=1.0"
+
+> 
+
+  <meta name="theme-color" content="#0b0b0f">    <title>DIMUWA MINI BOT V5.1</title>    <style>  
+    * {  
+      box-sizing: border-box;  
+      margin: 0;  
+      padding: 0;  
+    }  
+  
+    html {  
+      scroll-behavior: smooth;  
+    }  
+  
+    body {  
+      min-height: 100vh;  
+      font-family:  
+        Inter,  
+        Arial,  
+        Helvetica,  
+        sans-serif;  
+      background:  
+        radial-gradient(  
+          circle at top left,  
+          rgba(255, 0, 45, 0.18),  
+          transparent 35%  
+        ),  
+        radial-gradient(  
+          circle at top right,  
+          rgba(180, 0, 20, 0.12),  
+          transparent 35%  
+        ),  
+        #08080c;  
+      color: #ffffff;  
+    }  
+  
+    button,  
+    input {  
+      font: inherit;  
+    }  
+  
+    button {  
+      cursor: pointer;  
+    }  
+  
+    .container {  
+      width: min(1180px, calc(100% - 30px));  
+      margin: auto;  
+    }  
+  
+    /* =========================  
+       HEADER  
+    ========================== */  
+  
+    header {  
+      position: sticky;  
+      top: 0;  
+      z-index: 1000;  
+      backdrop-filter: blur(18px);  
+      background: rgba(8, 8, 12, 0.82);  
+      border-bottom: 1px solid rgba(255,255,255,0.08);  
+    }  
+  
+    .nav {  
+      min-height: 72px;  
+      display: flex;  
+      align-items: center;  
+      justify-content: space-between;  
+      gap: 15px;  
+    }  
+  
+    .brand {  
+      display: flex;  
+      align-items: center;  
+      gap: 12px;  
+    }  
+  
+    .brand img {  
+      width: 44px;  
+      height: 44px;  
+      border-radius: 14px;  
+      object-fit: cover;  
+      border: 1px solid rgba(255,255,255,0.15);  
+    }  
+  
+    .brand-title {  
+      font-size: 18px;  
+      font-weight: 900;  
+      letter-spacing: 0.5px;  
+    }  
+  
+    .brand-sub {  
+      font-size: 11px;  
+      color: #9b9ba8;  
+      margin-top: 2px;  
+    }  
+  
+    .online-badge {  
+      display: flex;  
+      align-items: center;  
+      gap: 7px;  
+      padding: 8px 12px;  
+      border-radius: 999px;  
+      background: rgba(255,255,255,0.05);  
+      border: 1px solid rgba(255,255,255,0.08);  
+      font-size: 12px;  
+      color: #aaa;  
+    }  
+  
+    .dot {  
+      width: 8px;  
+      height: 8px;  
+      border-radius: 50%;  
+      background: #777;  
+      box-shadow: 0 0 10px rgba(255,255,255,0.1);  
+    }  
+  
+    .dot.online {  
+      background: #31e981;  
+      box-shadow: 0 0 14px rgba(49,233,129,0.8);  
+    }  
+  
+    /* =========================  
+       HERO  
+    ========================== */  
+  
+    .hero {  
+      padding: 45px 0 25px;  
+    }  
+  
+    .hero-card {  
+      position: relative;  
+      overflow: hidden;  
+      padding: 32px;  
+      border-radius: 28px;  
+      background:  
+        linear-gradient(  
+          135deg,  
+          rgba(255,0,40,0.18),  
+          rgba(70,0,0,0.08)  
+        ),  
+        rgba(255,255,255,0.035);  
+      border: 1px solid rgba(255,255,255,0.09);  
+      box-shadow: 0 25px 80px rgba(0,0,0,0.35);  
+    }  
+  
+    .hero-card::before {  
+      content: "";  
+      position: absolute;  
+      width: 240px;  
+      height: 240px;  
+      right: -100px;  
+      top: -100px;  
+      border-radius: 50%;  
+      background: rgba(255,0,40,0.12);  
+      filter: blur(10px);  
+    }  
+  
+    .hero h1 {  
+      position: relative;  
+      font-size: clamp(30px, 6vw, 58px);  
+      line-height: 1;  
+      font-weight: 950;  
+      letter-spacing: -2px;  
+    }  
+  
+    .hero h1 span {  
+      background: linear-gradient(  
+        90deg,  
+        #ffffff,  
+        #ff304f,  
+        #ff7a7a  
+      );  
+      -webkit-background-clip: text;  
+      -webkit-text-fill-color: transparent;  
+    }  
+  
+    .hero p {  
+      position: relative;  
+      margin-top: 14px;  
+      color: #a6a6b4;  
+      font-size: 14px;  
+      max-width: 650px;  
+      line-height: 1.7;  
+    }  
+  
+    /* =========================  
+       MAIN GRID  
+    ========================== */  
+  
+    main {  
+      padding-bottom: 50px;  
+    }  
+  
+    .section {  
+      margin-top: 22px;  
+    }  
+  
+    .section-title {  
+      display: flex;  
+      align-items: center;  
+      justify-content: space-between;  
+      gap: 10px;  
+      margin-bottom: 12px;  
+    }  
+  
+    .section-title h2 {  
+      font-size: 17px;  
+      font-weight: 850;  
+    }  
+  
+    .section-title span {  
+      color: #777783;  
+      font-size: 11px;  
+    }  
+  
+    .grid {  
+      display: grid;  
+      grid-template-columns: repeat(2, minmax(0, 1fr));  
+      gap: 16px;  
+    }  
+  
+    .card {  
+      background: rgba(255,255,255,0.035);  
+      border: 1px solid rgba(255,255,255,0.08);  
+      border-radius: 22px;  
+      padding: 20px;  
+      box-shadow: 0 14px 45px rgba(0,0,0,0.18);  
+    }  
+  
+    .card h3 {  
+      font-size: 15px;  
+      margin-bottom: 7px;  
+    }  
+  
+    .card-description {  
+      color: #8e8e9b;  
+      font-size: 12px;  
+      line-height: 1.6;  
+      margin-bottom: 16px;  
+    }  
+  
+    /* =========================  
+       FORM  
+    ========================== */  
+  
+    .input-group {  
+      margin-bottom: 12px;  
+    }  
+  
+    .input-group label {  
+      display: block;  
+      color: #9696a3;  
+      font-size: 11px;  
+      margin-bottom: 7px;  
+    }  
+  
+    input {  
+      width: 100%;  
+      border: 1px solid rgba(255,255,255,0.09);  
+      background: rgba(0,0,0,0.25);  
+      color: #fff;  
+      border-radius: 13px;  
+      padding: 13px 14px;  
+      outline: none;  
+      transition: 0.2s;  
+    }  
+  
+    input:focus {  
+      border-color: rgba(255,48,79,0.65);  
+      box-shadow: 0 0 0 3px rgba(255,48,79,0.08);  
+    }  
+  
+    /* =========================  
+       BUTTONS  
+    ========================== */  
+  
+    .button-row {  
+      display: flex;  
+      flex-wrap: wrap;  
+      gap: 9px;  
+    }  
+  
+    .btn {  
+      border: 0;  
+      border-radius: 13px;  
+      padding: 12px 15px;  
+      color: white;  
+      background: rgba(255,255,255,0.08);  
+      border: 1px solid rgba(255,255,255,0.08);  
+      transition:  
+        transform 0.15s,  
+        background 0.15s,  
+        border-color 0.15s;  
+      font-size: 12px;  
+      font-weight: 800;  
+    }  
+  
+    .btn:hover {  
+      transform: translateY(-1px);  
+      background: rgba(255,255,255,0.13);  
+    }  
+  
+    .btn.primary {  
+      background: linear-gradient(  
+        135deg,  
+        #ff173f,  
+        #b80020  
+      );  
+      border-color: transparent;  
+    }  
+  
+    .btn.success {  
+      background: rgba(32,210,120,0.13);  
+      border-color: rgba(32,210,120,0.25);  
+    }  
+  
+    .btn.danger {  
+      background: rgba(255,60,85,0.12);  
+      border-color: rgba(255,60,85,0.22);  
+    }  
+  
+    .btn.warning {  
+      background: rgba(255,190,50,0.12);  
+      border-color: rgba(255,190,50,0.22);  
+    }  
+  
+    .btn:disabled {  
+      opacity: 0.5;  
+      cursor: not-allowed;  
+      transform: none;  
+    }  
+  
+    /* =========================  
+       PAIRING  
+    ========================== */  
+  
+    .pairing-box {  
+      margin-top: 15px;  
+      min-height: 80px;  
+      padding: 15px;  
+      border-radius: 16px;  
+      background: rgba(0,0,0,0.22);  
+      border: 1px dashed rgba(255,255,255,0.1);  
+    }  
+  
+    .pairing-code {  
+      font-size: 26px;  
+      letter-spacing: 5px;  
+      font-weight: 900;  
+      text-align: center;  
+      padding: 8px;  
+      color: #ff405d;  
+    }  
+  
+    .qr-box {  
+      display: none;  
+      margin-top: 15px;  
+      text-align: center;  
+    }  
+  
+    .qr-box img {  
+      width: min(260px, 100%);  
+      background: white;  
+      padding: 12px;  
+      border-radius: 18px;  
+    }  
+  
+    .empty {  
+      color: #777783;  
+      font-size: 12px;  
+      text-align: center;  
+      padding: 15px;  
+    }  
+  
+    /* =========================  
+       STATS  
+    ========================== */  
+  
+    .stats-grid {  
+      display: grid;  
+      grid-template-columns: repeat(4, minmax(0, 1fr));  
+      gap: 12px;  
+    }  
+  
+    .stat {  
+      padding: 18px;  
+      border-radius: 18px;  
+      background: rgba(255,255,255,0.035);  
+      border: 1px solid rgba(255,255,255,0.07);  
+    }  
+  
+    .stat-label {  
+      font-size: 10px;  
+      color: #777783;  
+      text-transform: uppercase;  
+      letter-spacing: 0.8px;  
+    }  
+  
+    .stat-value {  
+      font-size: 24px;  
+      font-weight: 900;  
+      margin-top: 7px;  
+    }  
+  
+    /* =========================  
+       DETAILS  
+    ========================== */  
+  
+    .details {  
+      display: grid;  
+      grid-template-columns: repeat(2, minmax(0, 1fr));  
+      gap: 9px;  
+    }  
+  
+    .detail {  
+      display: flex;  
+      align-items: center;  
+      justify-content: space-between;  
+      gap: 15px;  
+      padding: 12px 14px;  
+      border-radius: 13px;  
+      background: rgba(255,255,255,0.025);  
+      border: 1px solid rgba(255,255,255,0.055);  
+    }  
+  
+    .detail span:first-child {  
+      color: #83838f;  
+      font-size: 11px;  
+    }  
+  
+    .detail span:last-child {  
+      color: #fff;  
+      font-size: 11px;  
+      font-weight: 800;  
+      text-align: right;  
+      word-break: break-word;  
+    }  
+  
+    /* =========================  
+       COMMANDS  
+    ========================== */  
+  
+    .commands {  
+      display: grid;  
+      grid-template-columns: repeat(3, minmax(0, 1fr));  
+      gap: 10px;  
+    }  
+  
+    .command {  
+      padding: 14px;  
+      border-radius: 15px;  
+      background: rgba(255,255,255,0.025);  
+      border: 1px solid rgba(255,255,255,0.06);  
+    }  
+  
+    .command code {  
+      display: inline-block;  
+      padding: 5px 8px;  
+      border-radius: 8px;  
+      background: rgba(255,30,60,0.13);  
+      color: #ff9aaa;  
+      font-size: 11px;  
+      margin-bottom: 7px;  
+    }  
+  
+    .command p {  
+      color: #858591;  
+      font-size: 11px;  
+      line-height: 1.5;  
+    }  
+  
+    /* =========================  
+       SETTINGS INFO  
+    ========================== */  
+  
+    .settings-list {  
+      display: grid;  
+      gap: 8px;  
+    }  
+  
+    .setting-row {  
+      display: flex;  
+      align-items: center;  
+      justify-content: space-between;  
+      gap: 12px;  
+      padding: 11px 13px;  
+      border-radius: 12px;  
+      background: rgba(255,255,255,0.025);  
+    }  
+  
+    .setting-name {  
+      font-size: 11px;  
+      color: #8e8e99;  
+    }  
+  
+    .setting-value {  
+      font-size: 11px;  
+      font-weight: 850;  
+      color: #fff;  
+    }  
+  
+    /* =========================  
+       FOOTER  
+    ========================== */  
+  
+    footer {  
+      text-align: center;  
+      padding: 28px 15px 40px;  
+      color: #62626c;  
+      font-size: 11px;  
+    }  
+  
+    footer strong {  
+      color: #9999a5;  
+    }  
+  
+    /* =========================  
+       TOAST  
+    ========================== */  
+  
+    #toast {  
+      position: fixed;  
+      left: 50%;  
+      bottom: 22px;  
+      z-index: 5000;  
+      transform: translate(-50%, 20px);  
+      min-width: 220px;  
+      max-width: calc(100% - 30px);  
+      padding: 13px 17px;  
+      border-radius: 14px;  
+      background: rgba(22,22,28,0.95);  
+      border: 1px solid rgba(255,255,255,0.1);  
+      box-shadow: 0 20px 50px rgba(0,0,0,0.4);  
+      color: #fff;  
+      font-size: 12px;  
+      text-align: center;  
+      opacity: 0;  
+      pointer-events: none;  
+      transition: 0.25s;  
+    }  
+  
+    #toast.show {  
+      opacity: 1;  
+      transform: translate(-50%, 0);  
+    }  
+  
+    #toast.success {  
+      border-color: rgba(40,220,130,0.3);  
+    }  
+  
+    #toast.error {  
+      border-color: rgba(255,70,90,0.3);  
+    }  
+  
+    /* =========================  
+       LOADING  
+    ========================== */  
+  
+    .loading {  
+      display: inline-flex;  
+      align-items: center;  
+      gap: 7px;  
+    }  
+  
+    .spinner {  
+      width: 13px;  
+      height: 13px;  
+      border: 2px solid rgba(255,255,255,0.25);  
+      border-top-color: white;  
+      border-radius: 50%;  
+      animation: spin 0.8s linear infinite;  
+    }  
+  
+    @keyframes spin {  
+      to {  
+        transform: rotate(360deg);  
+      }  
+    }  
+  
+    /* =========================  
+       RESPONSIVE  
+    ========================== */  
+  
+    @media (max-width: 900px) {  
+      .stats-grid {  
+        grid-template-columns: repeat(2, 1fr);  
+      }  
+  
+      .commands {  
+        grid-template-columns: repeat(2, 1fr);  
+      }  
+    }  
+  
+    @media (max-width: 700px) {  
+      .container {  
+        width: min(100% - 20px, 1180px);  
+      }  
+  
+      .hero {  
+        padding-top: 25px;  
+      }  
+  
+      .hero-card {  
+        padding: 23px;  
+        border-radius: 22px;  
+      }  
+  
+      .grid,  
+      .details {  
+        grid-template-columns: 1fr;  
+      }  
+  
+      .commands {  
+        grid-template-columns: 1fr;  
+      }  
+  
+      .nav {  
+        min-height: 64px;  
+      }  
+  
+      .brand-sub {  
+        display: none;  
+      }  
+  
+      .online-badge {  
+        padding: 7px 9px;  
+      }  
+    }  
+  
+    @media (max-width: 450px) {  
+      .stats-grid {  
+        grid-template-columns: 1fr 1fr;  
+      }  
+  
+      .stat {  
+        padding: 14px;  
+      }  
+  
+      .stat-value {  
+        font-size: 20px;  
+      }  
+  
+      .button-row {  
+        flex-direction: column;  
+      }  
+  
+      .btn {  
+        width: 100%;  
+      }  
+  
+      .hero h1 {  
+        font-size: 34px;  
+      }  
+    }  
+  </style>  </head>  <body>    <!-- =========================  
+       HEADER  
+  ========================== -->    <header>  
+    <div class="container nav">  <div class="brand">  
+    <img  
+      src="https://files.catbox.moe/6gq4ub.jpeg"  
+      alt="DIMUWA"  
+    >  
+
+    <div>  
+      <div class="brand-title">  
+        DIMUWA MINI BOT V5.1  
+      </div>  
+
+      <div class="brand-sub">  
+        WhatsApp Bot Dashboard  
+      </div>  
+    </div>  
+  </div>  
+
+  <div class="online-badge">  
+    <span id="statusDot" class="dot"></span>  
+    <span id="statusText">Checking...</span>  
+  </div>  
+
+</div>
+
+  </header>    <!-- =========================  
+       HERO  
+  ========================== -->    <section class="hero">  
+    <div class="container">  <div class="hero-card">  
+
+    <h1>  
+      <span>DIMUWA</span>  
+      MINI BOT  
+    </h1>  
+
+    <p>  
+      Manage your WhatsApp bot, pairing, QR connection,  
+      statistics, commands and system controls from one dashboard.  
+    </p>  
+
+  </div>  
+
+</div>
+
+  </section>    <main class="container">  <!-- =========================  
+     CONNECTION  
+========================== -->  
+
+<section class="section">  
+
+  <div class="section-title">  
+    <h2>🔐 Bot Connection</h2>  
+    <span>Pair your WhatsApp account</span>  
+  </div>  
+
+  <div class="grid">  
+
+    <!-- PAIRING CARD -->  
+
+    <div class="card">  
+
+      <h3>📱 Pairing Code</h3>  
+
+      <p class="card-description">  
+        Enter a bot username and WhatsApp number to request  
+        a WhatsApp pairing code.  
+      </p>  
+
+      <div class="input-group">  
+        <label>BOT USERNAME</label>  
+
+        <input  
+          id="username"  
+          type="text"  
+          placeholder="example"  
+          autocomplete="off"  
+        >  
+      </div>  
+
+      <div class="input-group">  
+        <label>WHATSAPP NUMBER</label>  
+
+        <input  
+          id="phone"  
+          type="text"  
+          placeholder="947XXXXXXXX"  
+          autocomplete="off"  
+        >  
+      </div>  
+
+      <div class="button-row">  
+
+        <button  
+          class="btn primary"  
+          id="pairBtn"  
+          onclick="getPairingCode()"  
+        >  
+          🔐 GET PAIRING CODE  
+        </button>  
+
+        <button  
+          class="btn"  
+          onclick="copyPairingCode()"  
+        >  
+          📋 COPY CODE  
+        </button>  
+
+      </div>  
+
+      <div class="pairing-box">  
+
+        <div  
+          id="pairingResult"  
+          class="empty"  
+        >  
+          Pairing code will appear here.  
+        </div>  
+
+      </div>  
+
+    </div>  
+
+
+    <!-- QR CARD -->  
+
+    <div class="card">  
+
+      <h3>📷 QR Connection</h3>  
+
+      <p class="card-description">  
+        Generate a QR code and scan it using WhatsApp  
+        Linked Devices.  
+      </p>  
+
+      <div class="button-row">  
+
+        <button  
+          class="btn primary"  
+          id="qrBtn"  
+          onclick="getQR()"  
+        >  
+          📷 GET QR CODE  
+        </button>  
+
+        <button  
+          class="btn"  
+          onclick="hideQR()"  
+        >  
+          ✕ HIDE QR  
+        </button>  
+
+      </div>  
+
+      <div  
+        id="qrBox"  
+        class="qr-box"  
+      >  
+
+        <img  
+          id="qrImage"  
+          src=""  
+          alt="WhatsApp QR"  
+        >  
+
+        <p  
+          id="qrStatus"  
+          class="empty"  
+        >  
+          Waiting for QR...  
+        </p>  
+
+      </div>  
+
+    </div>  
+
+  </div>  
+
+</section>  
+
+
+<!-- =========================  
+     BOT DETAILS  
+========================== -->  
+
+<section class="section">  
+
+  <div class="section-title">  
+
+    <h2>🤖 Bot Details</h2>  
+
+    <button  
+      class="btn"  
+      onclick="loadDetails()"  
+    >  
+      🔄 Refresh  
+    </button>  
+
+  </div>  
+
+  <div class="card">  
+
+    <div class="details">  
+
+      <div class="detail">  
+        <span>Bot Status</span>  
+        <span id="detailStatus">-</span>  
+      </div>  
+
+      <div class="detail">  
+        <span>Username</span>  
+        <span id="detailUsername">-</span>  
+      </div>  
+
+      <div class="detail">  
+        <span>Phone</span>  
+        <span id="detailPhone">-</span>  
+      </div>  
+
+      <div class="detail">  
+        <span>Bot Name</span>  
+        <span id="detailName">-</span>  
+      </div>  
+
+      <div class="detail">  
+        <span>WhatsApp ID</span>  
+        <span id="detailJid">-</span>  
+      </div>  
+
+      <div class="detail">  
+        <span>Connected Since</span>  
+        <span id="detailSince">-</span>  
+      </div>  
+
+    </div>  
+
+  </div>  
+
+</section>  
+
+
+<!-- =========================  
+     STATISTICS  
+========================== -->  
+
+<section class="section">  
+
+  <div class="section-title">  
+
+    <h2>📊 Bot Statistics</h2>  
+
+    <button  
+      class="btn"  
+      onclick="loadStats()"  
+    >  
+      🔄 Refresh  
+    </button>  
+
+  </div>  
+
+  <div class="stats-grid">  
+
+    <div class="stat">  
+      <div class="stat-label">  
+        Messages  
+      </div>  
+
+      <div  
+        class="stat-value"  
+        id="statMessages"  
+      >  
+        0  
+      </div>  
+    </div>  
+
+    <div class="stat">  
+      <div class="stat-label">  
+        Commands  
+      </div>  
+
+      <div  
+        class="stat-value"  
+        id="statCommands"  
+      >  
+        0  
+      </div>  
+    </div>  
+
+    <div class="stat">  
+      <div class="stat-label">  
+        Downloads  
+      </div>  
+
+      <div  
+        class="stat-value"  
+        id="statDownloads"  
+      >  
+        0  
+      </div>  
+    </div>  
+
+    <div class="stat">  
+      <div class="stat-label">  
+        Uptime  
+      </div>  
+
+      <div  
+        class="stat-value"  
+        id="statUptime"  
+      >  
+        -  
+      </div>  
+    </div>  
+
+  </div>  
+
+</section>  
+
+
+<!-- =========================  
+     SYSTEM CONTROLS  
+========================== -->  
+
+<section class="section">  
+
+  <div class="section-title">  
+    <h2>⚙️ System Controls</h2>  
+    <span>Account management</span>  
+  </div>  
+
+  <div class="card">  
+
+    <div class="button-row">  
+
+      <button  
+        class="btn success"  
+        onclick="loadAll()"  
+      >  
+        🔄 REFRESH BOT  
+      </button>  
+
+      <button  
+        class="btn danger"  
+        onclick="logoutBot()"  
+      >  
+        🚪 LOGOUT  
+      </button>  
+
+      <button  
+        class="btn warning"  
+        onclick="unlinkBot()"  
+      >  
+        🔗 UNLINK  
+      </button>  
+
+    </div>  
+
+    <p  
+      class="card-description"  
+      style="margin-top:14px;margin-bottom:0;"  
+    >  
+      Logout and unlink actions affect the selected bot  
+      account. Use them only when you want to disconnect  
+      the WhatsApp session.  
+    </p>  
+
+  </div>  
+
+</section>  
+
+
+<!-- =========================  
+     SETTINGS  
+========================== -->  
+
+<section class="section">  
+
+  <div class="section-title">  
+
+    <h2>⚙️ Current Settings</h2>  
+
+    <button  
+      class="btn"  
+      onclick="loadSettings()"  
+    >  
+      🔄 Refresh  
+    </button>  
+
+  </div>  
+
+  <div class="card">  
+
+    <div class="settings-list">  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Always Online  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setAlwaysOnline"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Auto Read  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setAutoRead"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Bot Mode  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setBotMode"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Status Read  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setStatusRead"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Status React  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setStatusReact"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Composing  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setComposing"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Anti-Delete  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setAntiDelete"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Anti-Delete Target  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setAntiDelTarget"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          View Once Target  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setVvTarget"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Save Target  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setSaveTarget"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+      <div class="setting-row">  
+        <span class="setting-name">  
+          Bot Power  
+        </span>  
+
+        <span  
+          class="setting-value"  
+          id="setBotPower"  
+        >  
+          -  
+        </span>  
+      </div>  
+
+    </div>  
+
+    <p  
+      class="card-description"  
+      style="margin-top:15px;margin-bottom:0;"  
+    >  
+      Settings are controlled from WhatsApp using  
+      <strong>.settings</strong>.  
+    </p>  
+
+  </div>  
+
+</section>  
+
+
+<!-- =========================  
+     COMMANDS  
+========================== -->  
+
+<section class="section">  
+
+  <div class="section-title">  
+    <h2>📋 Bot Commands</h2>  
+    <span>Available commands</span>  
+  </div>  
+
+  <div class="commands">  
+
+    <div class="command">  
+      <code>.menu</code>  
+      <p>  
+        Show the main bot menu.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>.alive</code>  
+      <p>  
+        Check whether the bot is alive.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>.status</code>  
+      <p>  
+        Show bot status and information.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>.settings</code>  
+      <p>  
+        Open the settings menu and configure  
+        bot features.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>.vv</code>  
+      <p>  
+        Save/re-send View Once media according  
+        to the selected target.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>.save</code>  
+      <p>  
+        Save supported media such as image,  
+        video, audio, document and sticker.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>TikTok URL</code>  
+      <p>  
+        Download supported public TikTok videos.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>YouTube URL</code>  
+      <p>  
+        Download supported YouTube media.  
+      </p>  
+    </div>  
+
+    <div class="command">  
+      <code>Facebook URL</code>  
+      <p>  
+        Download supported public Facebook media.  
+      </p>  
+    </div>  
+
+  </div>  
+
+</section>  
+
+
+<!-- =========================  
+     SETTINGS HELP  
+========================== -->  
+
+<section class="section">  
+
+  <div class="section-title">  
+    <h2>🛠️ Settings Codes</h2>  
+    <span>Quick reference</span>  
+  </div>  
+
+  <div class="card">  
+
+    <div class="commands">  
+
+      <div class="command">  
+        <code>1.1 / 1.2</code>  
+        <p>  
+          Always Online ON / OFF  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>2.1 / 2.2</code>  
+        <p>  
+          Auto Read ON / OFF  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>3.1 / 3.2 / 3.3</code>  
+        <p>  
+          Public / Private / Inbox  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>4.1 / 4.2</code>  
+        <p>  
+          Status Read ON / OFF  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>5.1 / 5.2 / 5.3</code>  
+        <p>  
+          Green / Random / Off  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>7.1 / 7.2</code>  
+        <p>  
+          Composing ON / OFF  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>9.1 / 9.2</code>  
+        <p>  
+          Anti-Delete ON / OFF  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>10.1 / 10.2</code>  
+        <p>  
+          Anti-Delete Same Chat / My Inbox  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>11.1 / 11.2</code>  
+        <p>  
+          .vv Same Chat / My Inbox  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>12.1 / 12.2</code>  
+        <p>  
+          .save Same Chat / My Inbox  
+        </p>  
+      </div>  
+
+      <div class="command">  
+        <code>13.1 / 13.2</code>  
+        <p>  
+          Bot Power ON / OFF  
+        </p>  
+      </div>  
+
+    </div>  
+
+  </div>  
+
+</section>
+
+  </main>    <!-- =========================  
+       FOOTER  
+  ========================== -->    <footer>  
+    © 2026 <strong>DIMUWA BOT</strong>.  
+    Created by DIMUTH SATHSARA  
+  </footer>    <!-- =========================  
+       TOAST  
+  ========================== -->    <div id="toast"></div>    <!-- =========================  
+       JAVASCRIPT  
+  ========================== -->    <script>  
+  
+    /*  
+      DIMUWA MINI BOT V5.1 DASHBOARD  
+  
+      This dashboard talks to the API routes  
+      provided by index.js.  
+  
+      No external JavaScript library is required.  
+    */  
+  
+  
+    // ---------------------------------  
+    // GLOBAL STATE  
+    // ---------------------------------  
+  
+    let currentUsername = "";  
+  
+    let lastPairingCode = "";  
+  
+  
+    // ---------------------------------  
+    // ELEMENT HELPER  
+    // ---------------------------------  
+  
+    function $(id) {  
+      return document.getElementById(id);  
+    }  
+  
+  
+    // ---------------------------------  
+    // TOAST  
+    // ---------------------------------  
+  
+    function toast(message, type = "") {  
+  
+      const box = $("toast");  
+  
+      box.textContent = message;  
+  
+      box.className = "";  
+  
+      box.classList.add("show");  
+  
+      if (type) {  
+        box.classList.add(type);  
+      }  
+  
+      clearTimeout(window.__toastTimer);  
+  
+      window.__toastTimer = setTimeout(() => {  
+        box.classList.remove("show");  
+      }, 3000);  
+    }  
+  
+  
+    // ---------------------------------  
+    // API HELPER  
+    // ---------------------------------  
+  
+    async function api(url, options = {}) {  
+  
+      const response = await fetch(url, {  
+        ...options,  
+        headers: {  
+          "Content-Type": "application/json",  
+          ...(options.headers || {})  
+        }  
+      });  
+  
+      let data = {};  
+  
+      try {  
+        data = await response.json();  
+      } catch {  
+        data = {};  
+      }  
+  
+      if (!response.ok) {  
+  
+        throw new Error(  
+          data.error ||  
+          data.message ||  
+          `Request failed (${response.status})`  
+        );  
+  
+      }  
+  
+      return data;  
+    }  
+  
+  
+    // ---------------------------------  
+    // USERNAME  
+    // ---------------------------------  
+  
+    function getUsername() {  
+  
+      const value = $("username").value.trim();  
+  
+      if (!value) {  
+        toast("Enter bot username first.", "error");  
+        return null;  
+      }  
+  
+      currentUsername = value;  
+  
+      localStorage.setItem(  
+        "dimuwa_username",  
+        value  
+      );  
+  
+      return value;  
+    }  
+  
+  
+    // ---------------------------------  
+    // PHONE  
+    // ---------------------------------  
+  
+    function getPhone() {  
+  
+      const value = $("phone").value  
+        .trim()  
+        .replace(/\s+/g, "");  
+  
+      if (!value) {  
+        toast("Enter WhatsApp number first.", "error");  
+        return null;  
+      }  
+  
+      return value;  
+    }  
+  
+  
+    // ---------------------------------  
+    // PAIRING CODE  
+    // ---------------------------------  
+  
+    async function getPairingCode() {  
+  
+      const username = getUsername();  
+  
+      if (!username) return;  
+  
+      const phone = getPhone();  
+  
+      if (!phone) return;  
+  
+      const button = $("pairBtn");  
+  
+      button.disabled = true;  
+  
+      button.innerHTML =  
+        `<span class="loading">  
+          <span class="spinner"></span>  
+          REQUESTING...  
+        </span>`;  
+  
+      $("pairingResult").innerHTML =  
+        `<div class="empty">  
+          Requesting pairing code...  
+        </div>`;  
+  
+      try {  
+  
+        const data = await api(  
+          `/get-pairing-code?username=${encodeURIComponent(username)}&phone=${encodeURIComponent(phone)}`  
+        );  
+  
+        const code =  
+          data.code ||  
+          data.pairingCode ||  
+          data.pairing ||  
+          "";  
+  
+        lastPairingCode = code;  
+  
+        if (!code) {  
+  
+          $("pairingResult").innerHTML =  
+            `<div class="empty">  
+              ${escapeHtml(  
+                data.message ||  
+                "Pairing code was not returned."  
+              )}  
+            </div>`;  
+  
+          toast(  
+            data.message ||  
+            "Pairing code not available.",  
+            "error"  
+          );  
+  
+          return;  
+        }  
+  
+        $("pairingResult").innerHTML =  
+          `<div class="pairing-code">  
+            ${escapeHtml(code)}  
+          </div>  
+          <div class="empty">  
+            Enter this code in WhatsApp Linked Devices.  
+          </div>`;  
+  
+        toast(  
+          "Pairing code generated.",  
+          "success"  
+        );  
+  
+        loadAll();  
+  
+      } catch (error) {  
+  
+        $("pairingResult").innerHTML =  
+          `<div class="empty">  
+            ${escapeHtml(error.message)}  
+          </div>`;  
+  
+        toast(  
+          error.message,  
+          "error"  
+        );  
+  
+      } finally {  
+  
+        button.disabled = false;  
+  
+        button.textContent =  
+          "🔐 GET PAIRING CODE";  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // COPY PAIRING CODE  
+    // ---------------------------------  
+  
+    async function copyPairingCode() {  
+  
+      if (!lastPairingCode) {  
+  
+        toast(  
+          "No pairing code available.",  
+          "error"  
+        );  
+  
+        return;  
+      }  
+  
+      try {  
+  
+        await navigator.clipboard.writeText(  
+          lastPairingCode  
+        );  
+  
+        toast(  
+          "Pairing code copied.",  
+          "success"  
+        );  
+  
+      } catch {  
+  
+        toast(  
+          "Could not copy pairing code.",  
+          "error"  
+        );  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // QR CODE  
+    // ---------------------------------  
+  
+    async function getQR() {  
+  
+      const username = getUsername();  
+  
+      if (!username) return;  
+  
+      const button = $("qrBtn");  
+  
+      button.disabled = true;  
+  
+      button.innerHTML =  
+        `<span class="loading">  
+          <span class="spinner"></span>  
+          LOADING...  
+        </span>`;  
+  
+      $("qrBox").style.display = "block";  
+  
+      $("qrStatus").textContent =  
+        "Requesting QR code...";  
+  
+      try {  
+  
+        const data = await api(  
+          `/qr?username=${encodeURIComponent(username)}`  
+        );  
+  
+        const qr =  
+          data.qr ||  
+          data.qrCode ||  
+          data.image ||  
+          "";  
+  
+        if (data.connected) {  
+          $("qrImage").src = "";  
+          $("qrStatus").textContent = data.message || "WhatsApp is already connected.";  
+          toast("Bot is already connected.", "success");  
+          loadAll();  
+          return;  
+        }  
+  
+        if (!qr) {  
+          $("qrStatus").textContent =  
+            data.error || data.message ||  
+            "QR code not available. Tap Get QR Code again in a few seconds.";  
+          toast(  
+            data.error || data.message ||  
+            "QR code not available.",  
+            "error"  
+          );  
+          return;  
+        }  
+  
+        $("qrImage").src =  
+          qr.startsWith("data:")  
+            ? qr  
+            : `data:image/png;base64,${qr}`;  
+  
+        $("qrStatus").textContent =  
+          "Scan this QR using WhatsApp Linked Devices.";  
+  
+        toast(  
+          "QR code loaded.",  
+          "success"  
+        );  
+  
+      } catch (error) {  
+  
+        $("qrStatus").textContent =  
+          error.message;  
+  
+        toast(  
+          error.message,  
+          "error"  
+        );  
+  
+      } finally {  
+  
+        button.disabled = false;  
+  
+        button.textContent =  
+          "📷 GET QR CODE";  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // HIDE QR  
+    // ---------------------------------  
+  
+    function hideQR() {  
+  
+      $("qrBox").style.display = "none";  
+  
+      $("qrImage").src = "";  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // DETAILS  
+    // ---------------------------------  
+  
+    async function loadDetails() {  
+  
+      const username =  
+        $("username").value.trim() ||  
+        localStorage.getItem(  
+          "dimuwa_username"  
+        );  
+  
+      if (!username) return;  
+  
+      try {  
+  
+        const data = await api(  
+          `/details?username=${encodeURIComponent(username)}`  
+        );  
+  
+        const bot =  
+          data.bot ||  
+          data;  
+  
+        $("detailStatus").textContent =  
+          formatValue(  
+            bot.status ||  
+            bot.connection ||  
+            bot.connected  
+          );  
+  
+        $("detailUsername").textContent =  
+          formatValue(  
+            bot.username ||  
+            username  
+          );  
+  
+        $("detailPhone").textContent =  
+          formatValue(  
+            bot.phone ||  
+            bot.number  
+          );  
+  
+        $("detailName").textContent =  
+          formatValue(  
+            bot.name ||  
+            bot.pushName ||  
+            bot.botName  
+          );  
+  
+        $("detailJid").textContent =  
+          formatValue(  
+            bot.jid ||  
+            bot.id ||  
+            bot.user  
+          );  
+  
+        $("detailSince").textContent =  
+          formatDate(  
+            bot.connectedAt ||  
+            bot.startedAt ||  
+            bot.since  
+          );  
+  
+        updateConnectionUI(  
+          bot.connected === true ||  
+          String(bot.status || "")  
+            .toLowerCase()  
+            === "connected" ||  
+          String(bot.status || "")  
+            .toLowerCase()  
+            === "online"  
+        );  
+  
+      } catch (error) {  
+  
+        updateConnectionUI(false);  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // STATISTICS  
+    // ---------------------------------  
+  
+    async function loadStats() {  
+  
+      const username =  
+        $("username").value.trim() ||  
+        localStorage.getItem(  
+          "dimuwa_username"  
+        );  
+  
+      if (!username) return;  
+  
+      try {  
+  
+        const data = await api(  
+          `/stats?username=${encodeURIComponent(username)}`  
+        );  
+  
+        const stats =  
+          data.stats ||  
+          data;  
+  
+        $("statMessages").textContent =  
+          formatNumber(  
+            stats.messages ??  
+            stats.messageCount ??  
+            0  
+          );  
+  
+        $("statCommands").textContent =  
+          formatNumber(  
+            stats.commands ??  
+            stats.commandCount ??  
+            0  
+          );  
+  
+        $("statDownloads").textContent =  
+          formatNumber(  
+            stats.downloads ??  
+            stats.downloadCount ??  
+            0  
+          );  
+  
+        $("statUptime").textContent =  
+          formatUptime(  
+            stats.uptime  
+          );  
+  
+      } catch {  
+  
+        $("statMessages").textContent = "0";  
+        $("statCommands").textContent = "0";  
+        $("statDownloads").textContent = "0";  
+        $("statUptime").textContent = "-";  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // SETTINGS  
+    // ---------------------------------  
+  
+    async function loadSettings() {  
+  
+      const username =  
+        $("username").value.trim() ||  
+        localStorage.getItem(  
+          "dimuwa_username"  
+        );  
+  
+      if (!username) return;  
+  
+      try {  
+  
+        const data = await api(  
+          `/settings?username=${encodeURIComponent(username)}`  
+        );  
+  
+        const settings =  
+          data.settings ||  
+          data;  
+  
+        $("setAlwaysOnline").textContent =  
+          formatValue(  
+            settings.alwaysOnline  
+          );  
+  
+        $("setAutoRead").textContent =  
+          formatValue(  
+            settings.autoRead  
+          );  
+  
+        $("setBotMode").textContent =  
+          formatValue(  
+            settings.botMode  
+          );  
+  
+        $("setStatusRead").textContent =  
+          formatValue(  
+            settings.statusRead  
+          );  
+  
+        $("setStatusReact").textContent =  
+          formatValue(  
+            settings.statusReact  
+          );  
+  
+        $("setComposing").textContent =  
+          formatValue(  
+            settings.composing  
+          );  
+  
+        $("setAntiDelete").textContent =  
+          formatValue(  
+            settings.antiDelete  
+          );  
+  
+        $("setAntiDelTarget").textContent =  
+          formatValue(  
+            settings.antiDelTarget  
+          );  
+  
+        $("setVvTarget").textContent =  
+          formatValue(  
+            settings.vvTarget  
+          );  
+  
+        $("setSaveTarget").textContent =  
+          formatValue(  
+            settings.saveTarget  
+          );  
+  
+        $("setBotPower").textContent =  
+          formatValue(  
+            settings.botPower  
+          );  
+  
+      } catch {  
+  
+        // Settings endpoint may not exist  
+        // in older backend versions.  
+        // WhatsApp .settings still controls  
+        // the bot settings.  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // LOGOUT  
+    // ---------------------------------  
+  
+    async function logoutBot() {  
+  
+      const username = getUsername();  
+  
+      if (!username) return;  
+  
+      const confirmed =  
+        confirm(  
+          `Logout bot "${username}"?`  
+        );  
+  
+      if (!confirmed) return;  
+  
+      try {  
+  
+        const data = await api(  
+          `/logout?username=${encodeURIComponent(username)}`,  
+          {  
+            method: "POST"  
+          }  
+        );  
+  
+        toast(  
+          data.message ||  
+          "Bot logged out.",  
+          "success"  
+        );  
+  
+        updateConnectionUI(false);  
+  
+        loadAll();  
+  
+      } catch (error) {  
+  
+        toast(  
+          error.message,  
+          "error"  
+        );  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // UNLINK  
+    // ---------------------------------  
+  
+    async function unlinkBot() {  
+  
+      const username = getUsername();  
+  
+      if (!username) return;  
+  
+      const confirmed =  
+        confirm(  
+          `Unlink WhatsApp session for "${username}"?`  
+        );  
+  
+      if (!confirmed) return;  
+  
+      try {  
+  
+        const data = await api(  
+          `/unlink?username=${encodeURIComponent(username)}`,  
+          {  
+            method: "POST"  
+          }  
+        );  
+  
+        toast(  
+          data.message ||  
+          "Bot unlinked.",  
+          "success"  
+        );  
+  
+        updateConnectionUI(false);  
+  
+        loadAll();  
+  
+      } catch (error) {  
+  
+        toast(  
+          error.message,  
+          "error"  
+        );  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // CONNECTION UI  
+    // ---------------------------------  
+  
+    function updateConnectionUI(online) {  
+  
+      const dot =  
+        $("statusDot");  
+  
+      const text =  
+        $("statusText");  
+  
+      if (online) {  
+  
+        dot.classList.add("online");  
+  
+        text.textContent =  
+          "BOT ONLINE";  
+  
+      } else {  
+  
+        dot.classList.remove("online");  
+  
+        text.textContent =  
+          "BOT OFFLINE";  
+  
+      }  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // LOAD EVERYTHING  
+    // ---------------------------------  
+  
+    async function loadAll() {  
+  
+      const username =  
+        $("username").value.trim();  
+  
+      if (!username) return;  
+  
+      currentUsername =  
+        username;  
+  
+      localStorage.setItem(  
+        "dimuwa_username",  
+        username  
+      );  
+  
+      await Promise.allSettled([  
+        loadDetails(),  
+        loadStats(),  
+        loadSettings()  
+      ]);  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // HELPERS  
+    // ---------------------------------  
+  
+    function escapeHtml(value) {  
+  
+      if (  
+        value === null ||  
+        value === undefined  
+      ) {  
+        return "";  
+      }  
+  
+      return String(value)  
+        .replace(/&/g, "&amp;")  
+        .replace(/</g, "&lt;")  
+        .replace(/>/g, "&gt;")  
+        .replace(/"/g, "&quot;")  
+        .replace(/'/g, "&#039;");  
+  
+    }  
+  
+  
+    function formatValue(value) {  
+  
+      if (  
+        value === null ||  
+        value === undefined ||  
+        value === ""  
+      ) {  
+        return "-";  
+      }  
+  
+      if (typeof value === "boolean") {  
+        return value ? "ON" : "OFF";  
+      }  
+  
+      return String(value)  
+        .replace(/_/g, " ")  
+        .toUpperCase();  
+  
+    }  
+  
+  
+    function formatNumber(value) {  
+  
+      const number =  
+        Number(value);  
+  
+      if (  
+        Number.isNaN(number)  
+      ) {  
+        return "0";  
+      }  
+  
+      return number.toLocaleString();  
+  
+    }  
+  
+  
+    function formatDate(value) {  
+  
+      if (!value) {  
+        return "-";  
+      }  
+  
+      const date =  
+        new Date(value);  
+  
+      if (  
+        Number.isNaN(date.getTime())  
+      ) {  
+        return String(value);  
+      }  
+  
+      return date.toLocaleString();  
+  
+    }  
+  
+  
+    function formatUptime(value) {  
+  
+      if (  
+        value === null ||  
+        value === undefined  
+      ) {  
+        return "-";  
+      }  
+  
+      if (  
+        typeof value === "string"  
+      ) {  
+        return value;  
+      }  
+  
+      const seconds =  
+        Math.floor(  
+          Number(value)  
+        );  
+  
+      if (  
+        !Number.isFinite(seconds)  
+      ) {  
+        return "-";  
+      }  
+  
+      const days =  
+        Math.floor(  
+          seconds / 86400  
+        );  
+  
+      const hours =  
+        Math.floor(  
+          (seconds % 86400) / 3600  
+        );  
+  
+      const minutes =  
+        Math.floor(  
+          (seconds % 3600) / 60  
+        );  
+  
+      const secs =  
+        seconds % 60;  
+  
+      let result = "";  
+  
+      if (days) {  
+        result += `${days}d `;  
+      }  
+  
+      if (hours) {  
+        result += `${hours}h `;  
+      }  
+  
+      if (minutes) {  
+        result += `${minutes}m `;  
+      }  
+  
+      result += `${secs}s`;  
+  
+      return result.trim();  
+  
+    }  
+  
+  
+    // ---------------------------------  
+    // AUTO REFRESH  
+    // ---------------------------------  
+  
+    setInterval(() => {  
+  
+      const username =  
+        $("username").value.trim();  
+  
+      if (!username) return;  
+  
+      loadDetails();  
+      loadStats();  
+      loadSettings();  
+  
+    }, 30000);  
+  
+  
+    // ---------------------------------  
+    // PAGE START  
+    // ---------------------------------  
+  
+    document.addEventListener(  
+      "DOMContentLoaded",  
+      () => {  
+  
+        const savedUsername =  
+          localStorage.getItem(  
+            "dimuwa_username"  
+          );  
+  
+        if (savedUsername) {  
+  
+          $("username").value =  
+            savedUsername;  
+  
+          currentUsername =  
+            savedUsername;  
+  
+          loadAll();  
+  
+        }  
+  
+      }  
+    );  
+  
+  </script>  </body>  
+</html>  
