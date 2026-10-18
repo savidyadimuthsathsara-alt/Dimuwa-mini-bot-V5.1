@@ -1611,15 +1611,18 @@ sock.ev.on("creds.update", saveCreds);
 sock.ev.on("connection.update", async (update) => {  
   const { connection, lastDisconnect, qr } = update;  
 
-  if (qr) {  
-    try {  
-      const qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 500 });  
-      qrStore.set(clean, qrDataUrl);  
-      logger.info({ username: clean }, "QR generated");  
-    } catch (error) {  
-      logger.error({ error: error.message }, "QR generation error");  
-    }  
-  }  
+  if (qr) {
+    // A QR event means the WhatsApp handshake reached the pairing stage.
+    // Do not rely on WebSocket readyState alone for pairing-code requests.
+    sock.__hasReceivedQR = true;
+    try {
+      const qrDataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 500 });
+      qrStore.set(clean, qrDataUrl);
+      logger.info({ username: clean }, "QR generated");
+    } catch (error) {
+      logger.error({ error: error.message }, "QR generation error");
+    }
+  }
 
   if (connection === "open") {  
     qrStore.delete(clean);  
@@ -1722,87 +1725,83 @@ startingBots.delete(clean);
 PAIRING CODE + QR WAIT — FIXED
 ===================================================== */
 
-async function waitForSocketReady(sock, timeout = 25000) {
-const started = Date.now();
+async function waitForSocketReady(sock, timeout = 30000) {
+  const started = Date.now();
 
-while (Date.now() - started < timeout) {
-if (isConnected(sock)) return true;
+  while (Date.now() - started < timeout) {
+    if (isConnected(sock)) return true;
+    if (sock?.__hasReceivedQR) return true;
 
-const readyState = sock?.ws?.readyState;  
-// Baileys uses the WebSocket OPEN state (1) before pairing requests.  
-if (readyState === 1) return true;  
+    const readyState = sock?.ws?.readyState;
+    // CLOSED means this socket cannot accept a pairing request.
+    if (readyState === 3) return false;
 
-// CLOSED (3) means this socket cannot accept a pairing request.  
-if (readyState === 3) break;  
+    // WebSocket OPEN is not enough by itself: wait for Baileys to emit
+    // its QR event (pairing stage) or report a fully connected session.
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
 
-await new Promise(resolve => setTimeout(resolve, 250));
-
-}
-
-return isConnected(sock) || sock?.ws?.readyState === 1;
+  return isConnected(sock) || !!sock?.__hasReceivedQR;
 }
 
 async function getPairingCode(username, phone) {
-const clean = cleanUsername(username);
-const number = normalizePhone(phone);
+  const clean = cleanUsername(username);
+  const number = normalizePhone(phone);
 
-if (!number || number.length < 8 || number.length > 15) {
-throw new Error(
-"Enter a valid WhatsApp number with country code, digits only (no + sign)."
-);
-}
+  if (!number || number.length < 8 || number.length > 15) {
+    throw new Error("Enter a valid WhatsApp number with country code, digits only (no + sign).");
+  }
 
-let sock = bots.get(clean);
-if (!sock) sock = await startBot(clean, { pairing: true });
+  let sock = bots.get(clean);
+  if (!sock) sock = await startBot(clean, { pairing: true });
 
-if (isConnected(sock)) {
-return { connected: true, message: "This bot is already connected." };
-}
+  if (isConnected(sock)) {
+    return { connected: true, message: "This bot is already connected." };
+  }
 
-// Avoid duplicate pairing-code requests for the same socket.
-if (sock.__pairingRequest) return await sock.__pairingRequest;
+  // Pairing codes are short-lived. Reuse the latest code for the same
+  // number instead of accidentally invalidating it with repeated requests.
+  const cached = pairingStore.get(clean);
+  if (cached && typeof cached === "object" && cached.number === number &&
+      cached.code && Date.now() - cached.createdAt < 45000) {
+    return { connected: false, code: cached.code, phone: number, reused: true };
+  }
 
-pairingStore.set(clean, number);
+  // Do not allow two requests to race on the same Baileys socket.
+  if (sock.__pairingRequest) return await sock.__pairingRequest;
 
-sock.__pairingRequest = (async () => {
-const ready = await waitForSocketReady(sock, 25000);
+  sock.__pairingRequest = (async () => {
+    const ready = await waitForSocketReady(sock, 30000);
 
-if (isConnected(sock)) {  
-  return { connected: true, message: "This bot is already connected." };  
-}  
+    if (isConnected(sock)) {
+      return { connected: true, message: "This bot is already connected." };
+    }
 
-if (!ready) {  
-  throw new Error(  
-    "WhatsApp connection is not ready yet. Wait a few seconds and try again."  
-  );  
-}  
+    if (!ready) {
+      throw new Error("WhatsApp is still starting. Wait 10–20 seconds, then request a new code.");
+    }
 
-const rawCode = await sock.requestPairingCode(number);  
-if (!rawCode) {  
-  throw new Error("WhatsApp did not return a pairing code. Please try again.");  
-}  
+    // Keep the phone number in international format, digits only.
+    const rawCode = await sock.requestPairingCode(number);
+    const compactCode = String(rawCode || "").replace(/[^A-Za-z0-9]/g, "");
+    if (!compactCode) {
+      throw new Error("WhatsApp did not return a pairing code. Wait a few seconds and try again.");
+    }
 
-const code = String(rawCode)  
-  .replace(/[^A-Za-z0-9]/g, "")  
-  .match(/.{1,4}/g)  
-  .join("-");  
+    const code = compactCode.match(/.{1,4}/g).join("-");
+    pairingStore.set(clean, { number, code, createdAt: Date.now() });
+    logger.info({ username: clean }, "Pairing code generated");
+    return { connected: false, code, phone: number };
+  })();
 
-pairingStore.set(clean, number);  
-return { connected: false, code, phone: number };
-
-})();
-
-try {
-return await sock.__pairingRequest;
-} catch (error) {
-logger.error(
-{ username: clean, error: error.message },
-"Pairing code generation failed"
-);
-throw error;
-} finally {
-sock.__pairingRequest = null;
-}
+  try {
+    return await sock.__pairingRequest;
+  } catch (error) {
+    logger.error({ username: clean, error: error.message }, "Pairing code generation failed");
+    throw error;
+  } finally {
+    sock.__pairingRequest = null;
+  }
 }
 
 async function waitForQR(username, timeout = 25000) {
