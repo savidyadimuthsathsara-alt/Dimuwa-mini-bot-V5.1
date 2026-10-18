@@ -3,7 +3,7 @@
 /*
   DIMUWA MINI BOT VERSION 5.1.0 (PREMIUM LIVE DASHBOARD)
   Creator: Dimuth Sathsara
-  Fixed: Interactive Downloader, Duplicates, Status React, Always Online
+  Fixed: Interactive Downloader, Status React, Pairing Code Generation (Socket Wait)
 */
 
 const express = require("express");
@@ -80,7 +80,7 @@ const DEFAULT_SETTINGS = {
 const bots = new Map();
 const startingBots = new Map();
 const qrStore = new Map();
-const pairingStore = new Map();
+const pairingStore = new Map(); // Added cache for pairing codes
 const messageCache = new Map();
 const msgRetryCounterCache = new NodeCache(); 
 
@@ -518,6 +518,7 @@ async function sendMenu(sock, u, jid, msg) {
   } catch { 
     await sock.sendMessage(jid, { text: menuText(u) }, { quoted: msg }); 
   }
+  
   try { 
     await sock.sendMessage(jid, { audio: { url: MENU_AUDIO_URL }, mimetype: "audio/mpeg", ptt: false }); 
   } catch {}
@@ -778,7 +779,7 @@ async function handleMessage(username, sock, msg) {
     if (isSupportedUrl(url)) {
       const menuText = `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply to this message with a number:*\n\n1️⃣ - 🎬 Download Video\n2️⃣ - 🎵 Download Audio\n3️⃣ - 🖼️ Download Images\n\n🤖 DIMUWA MINI BOT V5.1`;
       await sock.sendMessage(msg.key.remoteJid, { text: menuText }, { quoted: msg });
-      return; // Stop further processing after sending menu
+      return; 
     }
   }
   
@@ -877,25 +878,64 @@ async function startBot(username, opts = {}) {
 }
 
 // ==========================================
-// PAIRING CODE GENERATION
+// PAIRING CODE GENERATION (FIXED WAITING)
 // ==========================================
+async function waitForSocketReady(sock, timeout = 30000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (isConnected(sock)) return true;
+    if (sock?.__qrReady) return true;
+    
+    const readyState = sock?.ws?.readyState;
+    if (readyState === 3) return false; // Connection closed
+    
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  return isConnected(sock) || !!sock?.__qrReady;
+}
+
 async function getPairingCode(username, phone) {
   const clean = cleanUsername(username); 
   const number = normalizePhone(phone);
+  
+  if (!number || number.length < 8) {
+    throw new Error("Please enter a valid WhatsApp number.");
+  }
   
   let sock = bots.get(clean); 
   if (!sock) sock = await startBot(clean);
   
   if (isConnected(sock)) return { connected: true };
+  
+  // Check cache to prevent spamming WhatsApp API
+  const cached = pairingStore.get(clean);
+  if (cached && cached.number === number && Date.now() - cached.time < 45000) {
+      return { connected: false, code: cached.code };
+  }
+
   if (sock.__pairingRequest) return await sock.__pairingRequest;
   
   sock.__pairingRequest = (async () => {
-    await new Promise(res => setTimeout(res, 3000));
     try {
-      const code = (await sock.requestPairingCode(number)).replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g).join("-");
+      // FIXED: Dynamic wait for socket to be ready (up to 25 seconds)
+      const ready = await waitForSocketReady(sock, 25000);
+      
+      if (isConnected(sock)) return { connected: true };
+      if (!ready) {
+        throw new Error("Bot is starting up. Please try again in 10 seconds.");
+      }
+      
+      const rawCode = await sock.requestPairingCode(number);
+      const code = String(rawCode || "").replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g)?.join("-");
+      
+      if (!code) throw new Error("Code not generated");
+      
+      // Store in cache
+      pairingStore.set(clean, { number, code, time: Date.now() });
+      
       return { connected: false, code };
     } catch (e) { 
-      throw new Error("Please wait a few seconds and try again."); 
+      throw new Error(e.message || "Please wait a few seconds and try again."); 
     }
   })();
   
