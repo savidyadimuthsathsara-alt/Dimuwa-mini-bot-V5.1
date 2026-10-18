@@ -2117,5 +2117,4 @@ logger.error({ error: error.message }, "Startup restore error");
 });
 
 // ===== FULL index.js COMPLETE =====
-
 ========== END index.js ==========
