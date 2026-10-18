@@ -1589,7 +1589,7 @@ const sock = makeWASocket({
   printQRInTerminal: false,  
   logger,  
   markOnlineOnConnect: true,  
-  syncFullHistory: true,  
+  syncFullHistory: false,  
   connectTimeoutMs: 60000,  
   defaultQueryTimeoutMs: 60000,  
   keepAliveIntervalMs: 25000,  
