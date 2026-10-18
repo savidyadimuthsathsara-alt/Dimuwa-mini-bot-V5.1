@@ -58,7 +58,7 @@ process.env.DATA_DIR ||
 process.env.RAILWAY_VOLUME_MOUNT_PATH ||
 path.join(__dirname, "data");
 
-const SESSION_DIR = path.join(DATA_DIR, "sessions");
+const SESSION_DIR = path.join(DATA_DIR, "sessions_new");
 const MEDIA_DIR = path.join(DATA_DIR, "media");
 const TOOLS_DIR = path.join(DATA_DIR, "tools");
 
