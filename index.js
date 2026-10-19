@@ -4,6 +4,7 @@
   DIMUWA MINI BOT VERSION 5.1.0 (PREMIUM LIVE DASHBOARD)
   Creator: Dimuth Sathsara
   Fixed: Interactive Downloader, Duplicates, Status React, Always Online
+  Fixed: Baileys 7.0.0, QR/Pairing Connection Errors
 */
 
 const express = require("express");
@@ -28,7 +29,8 @@ const {
   downloadMediaMessage,
   getContentType,
   normalizeMessageContent,
-  proto
+  proto,
+  fetchLatestWaWebVersion
 } = require("@whiskeysockets/baileys");
 
 // ==========================================
@@ -799,9 +801,13 @@ async function startBot(username, opts = {}) {
     
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
     
+    // FIX: Fetch latest WhatsApp Web version to avoid 428/Connection Error
+    const { version } = await fetchLatestWaWebVersion().catch(() => ({ version: [2, 3000, 1038544855] }));
+    
     const sock = makeWASocket({
+      version,
       auth: state, 
-      browser: Browsers.macOS("Desktop"), 
+      browser: Browsers.ubuntu("Chrome"), // FIX: Changed from macOS("Desktop")
       printQRInTerminal: false, 
       logger,
       markOnlineOnConnect: false, 
@@ -831,6 +837,19 @@ async function startBot(username, opts = {}) {
           logger.info({ username: clean }, "WhatsApp QR generated");
         } catch (err) {
           logger.error({ err, username: clean }, "Failed to convert WhatsApp QR");
+        }
+
+        // FIX: Generate Pairing Code only when socket is ready (qr event)
+        if (sock.__pendingPairingPhone) {
+          try {
+            const code = (await sock.requestPairingCode(sock.__pendingPairingPhone)).replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g).join("-");
+            sock.__pairingCodeResult = code;
+            logger.info({ username: clean }, "Pairing code generated successfully");
+          } catch (e) {
+            sock.__pairingError = e.message || "Failed to generate pairing code";
+            logger.error({ err: e, username: clean }, "Pairing code request failed");
+          }
+          sock.__pendingPairingPhone = null;
         }
       }
       
@@ -884,52 +903,38 @@ async function startBot(username, opts = {}) {
 // PAIRING CODE GENERATION
 // ==========================================
 async function getPairingCode(username, phone) {
-  const clean = cleanUsername(username);
+  const clean = cleanUsername(username); 
   const number = normalizePhone(phone);
-
-  if (!/^\d{8,15}$/.test(number)) {
-    throw new Error("Enter a valid WhatsApp number with country code.");
-  }
-
-  let sock = bots.get(clean);
+  
+  let sock = bots.get(clean); 
   if (!sock) sock = await startBot(clean);
+  
   if (isConnected(sock)) return { connected: true };
   if (sock.__pairingRequest) return await sock.__pairingRequest;
-
+  
+  // FIX: Wait for QR event to trigger pairing code instead of hardcoded timeout
   sock.__pairingRequest = (async () => {
-    try {
-      // Wait for the WhatsApp WebSocket before asking Baileys for a code.
-      const deadline = Date.now() + 15000;
-      while (Date.now() < deadline) {
-        if (isConnected(sock)) return { connected: true };
-        const state = sock.ws?.readyState;
-        if (state === 1) break; // WebSocket.OPEN
-        if (state === 2 || state === 3) {
-          throw new Error("WhatsApp connection closed before pairing started. Check Railway logs.");
-        }
-        await new Promise(resolve => setTimeout(resolve, 300));
+    sock.__pendingPairingPhone = number;
+    sock.__pairingCodeResult = null;
+    sock.__pairingError = null;
+    
+    // Wait up to 20 seconds for the QR event to fire and code to generate
+    for (let i = 0; i < 40; i++) {
+      if (sock.__pairingCodeResult) {
+        return { connected: false, code: sock.__pairingCodeResult };
       }
-
-      if (isConnected(sock)) return { connected: true };
-      if (sock.ws?.readyState !== 1) {
-        throw new Error("WhatsApp connection was not ready within 15 seconds. Try again after checking Railway logs.");
+      if (sock.__pairingError) {
+        throw new Error(sock.__pairingError);
       }
-
-      const rawCode = await sock.requestPairingCode(number);
-      const cleanedCode = String(rawCode || "").replace(/[^A-Za-z0-9]/g, "");
-      if (!cleanedCode) throw new Error("WhatsApp did not return a pairing code.");
-      const groups = cleanedCode.match(/.{1,4}/g) || [];
-      return { connected: false, code: groups.join("-") };
-    } catch (e) {
-      logger.error({ err: e, username: clean }, "Pairing code request failed");
-      throw new Error(`Pairing code failed: ${e.message || "WhatsApp connection is not ready"}`);
+      await new Promise(r => setTimeout(r, 500));
     }
+    throw new Error("Pairing code request timed out. WhatsApp connection is not ready.");
   })();
-
-  try {
-    return await sock.__pairingRequest;
-  } finally {
-    sock.__pairingRequest = null;
+  
+  try { 
+    return await sock.__pairingRequest; 
+  } finally { 
+    sock.__pairingRequest = null; 
   }
 }
 
@@ -946,28 +951,31 @@ app.get("/get-pairing-code", async (req, res) => {
 
 app.get("/qr", async (req, res) => {
   try {
-    const u = cleanUsername(req.query.username);
-    let sock = bots.get(u);
-
-    // Reuse an in-progress startup instead of creating parallel sockets.
-    if (!sock) sock = await startBot(u);
-    if (isConnected(sock)) return res.json({ ok: true, connected: true });
-
-    // QR is emitted asynchronously by connection.update; wait up to 25 seconds.
-    let qrImage = null;
-    for (let i = 0; i < 50; i++) {
-      if (isConnected(sock)) return res.json({ ok: true, connected: true });
-      qrImage = qrStore.get(u) || null;
-      if (qrImage) break;
-      if (sock.ws?.readyState === 3) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
+    const u = cleanUsername(req.query.username); 
+    let s = bots.get(u);
+    
+    if (!s && !startingBots.has(u)) { 
+      qrStore.delete(u); 
+      s = await startBot(u); 
+    } else if (!s) {
+      s = await startBot(u);
     }
-
-    if (!qrImage) throw new Error("QR not ready. Wait a few seconds and try again; check Railway logs if it repeats.");
-    return res.json({ ok: true, connected: false, qr: qrImage });
-  } catch (e) {
-    logger.error({ err: e, username: cleanUsername(req.query.username) }, "QR request failed");
-    return res.status(503).json({ ok: false, error: e.message });
+    
+    if (isConnected(s)) return res.json({ ok: true, connected: true });
+    
+    let qr = null; 
+    for(let i=0; i<50; i++) { 
+      if(qrStore.has(u)) { 
+        qr = qrStore.get(u); 
+        break; 
+      } 
+      await new Promise(r => setTimeout(r, 500)); 
+    }
+    
+    if (!qr) throw new Error("QR not ready");
+    res.json({ ok: true, qr });
+  } catch (e) { 
+    res.status(503).json({ ok: false, error: e.message }); 
   }
 });
 
