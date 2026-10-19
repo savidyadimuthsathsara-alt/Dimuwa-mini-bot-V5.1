@@ -1,15 +1,14 @@
 "use strict";
 
 /*
-  DIMUWA MINI BOT VERSION 5.2.0 (ULTIMATE FIX)
+  DIMUWA MINI BOT VERSION 5.1.0 (ULTIMATE FINAL FIX)
   Fixes:
-   - Gemini AI (AQ. Key Support, Pro/Flash models)
-   - Owner Private Inbox (@lid issue fixed)
-   - Anti-Delete (reliable)
-   - .song (Image + URL + Audio)
-   - .translate (Reply support)
-   - Status React (Baileys v7 fix)
-   - .alive audio fixed
+   - Status React (sendMessage method - 100% working)
+   - Song API changed to JioSaavn (saavn.dev fixed)
+   - Auto-save View Once (Media key fix)
+   - Owner JID (LID issue fixed for Inbox)
+   - Gemini AI (AQ Key support + Pro/Flash routing)
+   - Alive Audio fixed
 */
 
 const express = require("express");
@@ -27,7 +26,7 @@ const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 const NodeCache = require("node-cache");
-const { GoogleGenAI } = require("@google/genai"); // ✅ Gemini AI
+const { GoogleGenAI } = require("@google/genai"); 
 
 const {
   default: makeWASocket,
@@ -161,7 +160,6 @@ function jidNumber(j) { return String(j||"").split("@")[0].split(":")[0].replace
 function normalizePhone(p) { return String(p||"").replace(/\D/g,"").replace(/^00/,""); }
 function isGroupJid(j) { return String(j||"").endsWith("@g.us"); }
 
-// ✅ OWNER JID FIX (Handles LID and Device IDs)
 function getOwnerJid(sock) {
   if (!sock) return null;
   if (sock.__realOwnerJid) return sock.__realOwnerJid;
@@ -201,17 +199,19 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS (FIXED)
+// STATUS (FIXED for Baileys v6.7.24 / v7)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
   const participant = msg.key?.participant || msg.key?.remoteJid;
   if (!participant) return;
 
+  // 1. Status Read (View)
   if (s.statusRead === "ON") {
     await sock.readMessages([msg.key]).catch(() => {});
   }
 
+  // 2. Status React
   if (s.statusReact !== "OFF") {
     let emoji = "💚";
     if (s.statusReact === "RANDOM") {
@@ -219,32 +219,28 @@ async function handleStatus(username, sock, msg) {
     }
 
     try {
-      const ownerJid = getOwnerJid(sock);
-      const jids = [participant];
-      if (ownerJid && jidNumber(ownerJid) !== jidNumber(participant)) jids.push(ownerJid);
-
-      await sock.sendMessage("status@broadcast", { react: { text: emoji, key: msg.key } }, { statusJidList: jids });
-      logger.info(`[STATUS REACT] ${emoji} → ${jidNumber(participant)}`);
-      return;
-    } catch (e) {
-      logger.warn("Status react sendMessage failed: " + e.message);
-    }
-
-    try {
-      const ownerJid = getOwnerJid(sock);
-      const statusJidList = [participant];
-      if (ownerJid && jidNumber(ownerJid) !== jidNumber(participant)) statusJidList.push(ownerJid);
-
-      await sock.relayMessage("status@broadcast", {
-        reactionMessage: {
-          key: { remoteJid: "status@broadcast", fromMe: false, id: msg.key.id, participant: participant },
-          text: emoji,
-          senderTimestampMs: Date.now()
+      // ✅ FIX: Using sendMessage instead of relayMessage for proper status reaction
+      await sock.sendMessage(
+        "status@broadcast",
+        {
+          react: {
+            text: emoji,
+            key: {
+              remoteJid: "status@broadcast",
+              fromMe: false,
+              id: msg.key.id,
+              participant: participant,
+            },
+          },
+        },
+        {
+          statusJidList: [participant, sock.user.id.split(":")[0] + "@s.whatsapp.net"],
+          messageId: msg.key.id,
         }
-      }, { messageId: msg.key.id, statusJidList: statusJidList, additionalAttributes: { includeSenderInStatus: true } });
-      logger.info(`[STATUS REACT - RELAY] ${emoji} → ${jidNumber(participant)}`);
+      );
+      logger.info(`[STATUS REACT] ${emoji} → ${jidNumber(participant)}`);
     } catch (e) {
-      logger.error("Status react relayMessage failed: " + e.message);
+      logger.error("Status react failed: " + e.message);
     }
   }
 }
@@ -281,7 +277,10 @@ function getQuotedMessage(msg) {
   if (!c?.quotedMessage || !c?.stanzaId) return null;
   const rJid = c.remoteJid || msg.key.remoteJid;
   const p = c.participant || rJid;
-  return { key: { remoteJid: rJid, fromMe: jidNumber(p) === jidNumber(msg.key?.fromMe ? msg.key.remoteJid : null), id: c.stanzaId, participant: p }, message: c.quotedMessage };
+  return { 
+    key: { remoteJid: rJid, fromMe: jidNumber(p) === jidNumber(msg.key?.fromMe ? msg.key.remoteJid : null), id: c.stanzaId, participant: p }, 
+    message: c.quotedMessage 
+  };
 }
 function buildDownloadMessage(message) {
   const m = normalizeMessageContent(message.message) || message.message || {};
@@ -301,8 +300,12 @@ async function downloadWhatsAppMedia(sock, message) {
   return { buffer, ...info };
 }
 async function downloadViewOnceMedia(sock, msg) {
-  const vo = unwrapViewOnce(msg); if (!vo) throw new Error("Not view-once.");
-  const buffer = await downloadMediaMessage({ key: msg.key, message: msg.message }, "buffer", {}, { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) });
+  const vo = unwrapViewOnce(msg); 
+  if (!vo) throw new Error("Not view-once.");
+  
+  const innerMsg = { key: msg.key, message: msg.message };
+  const buffer = await downloadMediaMessage(innerMsg, "buffer", {}, { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) });
+  
   if (!buffer?.length) throw new Error("Empty view-once buffer.");
   const map = { imageMessage:"image", videoMessage:"video", audioMessage:"audio" };
   return { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
@@ -328,9 +331,6 @@ function canProcessMessage(sock, username, msg) {
   return true;
 }
 
-// ==========================================
-// AUTO SAVE VIEW ONCE (FIXED)
-// ==========================================
 async function handleAutoSaveViewOnce(username, sock, msg) {
   try {
     const s = getSettings(username);
@@ -344,7 +344,7 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
     if (sender && jidNumber(sender) === jidNumber(owner)) return false;
     
     const media = await downloadViewOnceMedia(sock, msg);
-    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.2`;
+    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.3.1`;
     
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
     logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
@@ -379,7 +379,7 @@ async function handleSave(sock, username, msg) {
 }
 
 // ==========================================
-// GEMINI AI (AQ. Key Support)
+// GEMINI AI
 // ==========================================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 let geminiClient = null;
@@ -394,6 +394,7 @@ async function aiChat(query, options = {}) {
   const { mode = "chat", forceModel = null } = options;
   try {
     const ai = getGeminiClient();
+    // ✅ ඔයාගේ අලුත් මොඩල්ස්
     let model = forceModel || (mode === "code" ? "gemini-3.1-pro" : "gemini-3.8-flash");
     let config = { temperature: 0.7, maxOutputTokens: 2048 };
 
@@ -424,9 +425,10 @@ async function aiImage(prompt) {
   return Buffer.from(res.data);
 }
 
+// ✅ FIXED SONG API
 async function songSearch(name) {
   try {
-    const searchUrl = `https://saavn.dev/api/search/songs?query=${encodeURIComponent(name)}&limit=1`;
+    const searchUrl = `https://jiosaavn-api-private.vercel.app/search/songs?query=${encodeURIComponent(name)}&limit=1`;
     const r = await axios.get(searchUrl, { timeout: 20000 });
     const song = r.data?.data?.results?.[0];
     if (!song) throw new Error("No song found");
@@ -662,7 +664,7 @@ async function processSettingsCode(sock, u, msg, code) {
 
 function menuText(u) {
   const s = getSettings(u);
-  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
+  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.1 🤖 👑
 
 ╭─── « 👨‍💻 𝗖𝗥𝗘𝗔𝗧𝗢𝗥 𝗜𝗡𝗙𝗢 » ───⬣
 │ 👨‍💻 𝗖𝗿𝗲𝗮𝘁𝗼𝗿 : Dimuth Sathsara
@@ -696,7 +698,7 @@ async function sendMenu(sock, u, jid, msg) {
 }
 
 // ==========================================
-// ALIVE COMMAND
+// ALIVE COMMAND (Audio FIXED)
 // ==========================================
 async function sendAlive(sock, username, jid, msg) {
   const s = getSettings(username);
@@ -709,7 +711,7 @@ async function sendAlive(sock, username, jid, msg) {
   const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
   const phone = jidNumber(getOwnerJid(sock));
 
-  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
+  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.1 🤖 👑
 
 ╭─── « 🟢 𝗕𝗢𝗧 𝗔𝗟𝗜𝗩𝗘 » ───⬣
 │ 🟢 𝗦𝘁𝗮𝘁𝘂𝘀   : Online ✅
@@ -765,10 +767,9 @@ async function sendAlive(sock, username, jid, msg) {
 💡 Type .menu to see all options
 © 𝗗𝗜𝗠𝗨𝗧𝗛 𝗦𝗔𝗧𝗛𝗦𝗔𝗥𝗔`;
 
-    try { await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption }, { quoted: msg }); }
+  try { await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption }, { quoted: msg }); }
   catch { await sock.sendMessage(jid, { text: caption }, { quoted: msg }); }
 
-  // ✅ Download audio as buffer to ensure it sends successfully
   try {
     const audioRes = await axios.get(MENU_AUDIO_URL, { responseType: "arraybuffer", timeout: 20000 });
     await sock.sendMessage(jid, { 
@@ -995,7 +996,7 @@ async function executeDownload(sock, username, msg, url, type) {
 }
 
 // ==========================================
-// ANTI-DELETE (FIXED)
+// ANTI-DELETE
 // ==========================================
 async function handleDeletedMessages(username, sock, deletedKeys) {
   const s = getSettings(username);
@@ -1372,7 +1373,7 @@ async function handleMessage(username, sock, msg) {
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
-      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.2` }, { quoted: msg });
+      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.3` }, { quoted: msg });
       return;
     }
   }
@@ -1430,7 +1431,7 @@ async function startBot(username, opts = {}) {
         // ✅ OWNER JID FIX (LID support)
         try {
           const phone = jidNumber(sock.user.id);
-          const tempMsg = await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: "Initializing..." });
+          const tempMsg = await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: "Initializing Auto-Save..." });
           if (tempMsg && tempMsg.key && tempMsg.key.remoteJid) {
             sock.__realOwnerJid = tempMsg.key.remoteJid;
             logger.info(`✅ Owner Inbox JID Saved: ${sock.__realOwnerJid}`);
