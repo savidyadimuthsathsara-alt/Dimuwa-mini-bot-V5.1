@@ -394,7 +394,7 @@ async function aiChat(query, options = {}) {
   const { mode = "chat", forceModel = null } = options;
   try {
     const ai = getGeminiClient();
-    let model = forceModel || (mode === "code" ? "gemini-2.5-pro" : "gemini-2.5-flash");
+    let model = forceModel || (mode === "code" ? "gemini-3.1-pro" : "gemini-3.8-flash");
     let config = { temperature: 0.7, maxOutputTokens: 2048 };
 
     if (mode === "code") {
