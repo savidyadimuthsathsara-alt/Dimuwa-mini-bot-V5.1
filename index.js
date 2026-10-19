@@ -1,14 +1,15 @@
 "use strict";
 
 /*
-  DIMUWA MINI BOT VERSION 5.1.3 (FINAL)
+  DIMUWA MINI BOT VERSION 5.2.0 (ULTIMATE FIX)
   Fixes:
-   - .settings panel (exact design)
-   - .alive (image + voice + full command list)
-   - Status React (relayMessage — Baileys v7)
-   - Auto React (messages)
-   - Audio downloader
-   - All 21 new commands
+   - Gemini AI (AQ. Key Support, Pro/Flash models)
+   - Owner Private Inbox (@lid issue fixed)
+   - Anti-Delete (reliable)
+   - .song (Image + URL + Audio)
+   - .translate (Reply support)
+   - Status React (Baileys v7 fix)
+   - .alive audio fixed
 */
 
 const express = require("express");
@@ -26,6 +27,7 @@ const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 const NodeCache = require("node-cache");
+const { GoogleGenAI } = require("@google/genai"); // ✅ Gemini AI
 
 const {
   default: makeWASocket,
@@ -35,7 +37,6 @@ const {
   downloadMediaMessage,
   getContentType,
   normalizeMessageContent,
-  proto,
   fetchLatestWaWebVersion
 } = require("@whiskeysockets/baileys");
 
@@ -105,7 +106,7 @@ const DEFAULT_SETTINGS = {
 };
 
 // ==========================================
-// STORAGE
+// STORAGE & CACHE
 // ==========================================
 const bots = new Map();
 const startingBots = new Map();
@@ -153,18 +154,28 @@ function saveStats() { writeJson(STATS_FILE, statsDB); }
 function incrementStat(u, field, amount=1) { const s = getStats(u); s[field] = Number(s[field]||0)+amount; saveStats(); }
 
 // ==========================================
-// HELPERS
+// HELPERS & JID FIXES
 // ==========================================
 function isConnected(sock) { return !!(sock && sock.user && sock.user.id); }
-function getOwnerJid(sock) { return sock?.user?.id ? sock.user.id : null; }
 function jidNumber(j) { return String(j||"").split("@")[0].split(":")[0].replace(/\D/g,""); }
 function normalizePhone(p) { return String(p||"").replace(/\D/g,"").replace(/^00/,""); }
+function isGroupJid(j) { return String(j||"").endsWith("@g.us"); }
+
+// ✅ OWNER JID FIX (Handles LID and Device IDs)
+function getOwnerJid(sock) {
+  if (!sock) return null;
+  if (sock.__realOwnerJid) return sock.__realOwnerJid;
+  if (!sock.user || !sock.user.id) return null;
+  return `${jidNumber(sock.user.id)}@s.whatsapp.net`;
+}
+
 function isOwner(sock, msg) {
-  const o = getOwnerJid(sock); if (!o) return false;
+  const o = getOwnerJid(sock); 
+  if (!o) return false;
   if (msg.key?.fromMe) return true;
   return jidNumber(msg.key?.participant || msg.key?.remoteJid) === jidNumber(o);
 }
-function isGroupJid(j) { return String(j||"").endsWith("@g.us"); }
+
 function getMessageText(msg) {
   if (!msg?.message) return "";
   const m = normalizeMessageContent(msg.message) || msg.message;
@@ -190,19 +201,17 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS (FIXED: relayMessage for Baileys v7)
+// STATUS (FIXED)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
   const participant = msg.key?.participant || msg.key?.remoteJid;
   if (!participant) return;
 
-  // Status Read
   if (s.statusRead === "ON") {
     await sock.readMessages([msg.key]).catch(() => {});
   }
 
-  // Status React
   if (s.statusReact !== "OFF") {
     let emoji = "💚";
     if (s.statusReact === "RANDOM") {
@@ -211,48 +220,37 @@ async function handleStatus(username, sock, msg) {
 
     try {
       const ownerJid = getOwnerJid(sock);
+      const jids = [participant];
+      if (ownerJid && jidNumber(ownerJid) !== jidNumber(participant)) jids.push(ownerJid);
+
+      await sock.sendMessage("status@broadcast", { react: { text: emoji, key: msg.key } }, { statusJidList: jids });
+      logger.info(`[STATUS REACT] ${emoji} → ${jidNumber(participant)}`);
+      return;
+    } catch (e) {
+      logger.warn("Status react sendMessage failed: " + e.message);
+    }
+
+    try {
+      const ownerJid = getOwnerJid(sock);
       const statusJidList = [participant];
       if (ownerJid && jidNumber(ownerJid) !== jidNumber(participant)) statusJidList.push(ownerJid);
 
-      await sock.relayMessage(
-        "status@broadcast",
-        {
-          reactionMessage: {
-            key: {
-              remoteJid: "status@broadcast",
-              fromMe: false,
-              id: msg.key.id,
-              participant: participant
-            },
-            text: emoji,
-            senderTimestampMs: Date.now()
-          }
-        },
-        {
-          messageId: msg.key.id,
-          statusJidList: statusJidList,
-          additionalAttributes: { includeSenderInStatus: true }
+      await sock.relayMessage("status@broadcast", {
+        reactionMessage: {
+          key: { remoteJid: "status@broadcast", fromMe: false, id: msg.key.id, participant: participant },
+          text: emoji,
+          senderTimestampMs: Date.now()
         }
-      );
-      logger.info(`[STATUS REACT] ${emoji} → ${jidNumber(participant)}`);
+      }, { messageId: msg.key.id, statusJidList: statusJidList, additionalAttributes: { includeSenderInStatus: true } });
+      logger.info(`[STATUS REACT - RELAY] ${emoji} → ${jidNumber(participant)}`);
     } catch (e) {
-      logger.warn("Status react relay failed: " + e.message);
-      try {
-        const ownerJid = getOwnerJid(sock);
-        const jids = [participant];
-        if (ownerJid) jids.push(ownerJid);
-        await sock.sendMessage(
-          "status@broadcast",
-          { react: { text: emoji, key: msg.key } },
-          { statusJidList: jids }
-        );
-      } catch (e2) { logger.error("Status react fallback: " + e2.message); }
+      logger.error("Status react relayMessage failed: " + e.message);
     }
   }
 }
 
 // ==========================================
-// MEDIA
+// MEDIA HELPERS
 // ==========================================
 function unwrapViewOnce(msg) {
   if (!msg?.message) return null;
@@ -330,19 +328,31 @@ function canProcessMessage(sock, username, msg) {
   return true;
 }
 
+// ==========================================
+// AUTO SAVE VIEW ONCE (FIXED)
+// ==========================================
 async function handleAutoSaveViewOnce(username, sock, msg) {
   try {
     const s = getSettings(username);
     if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg)) return false;
-    const owner = getOwnerJid(sock); if (!owner) return false;
+    
+    const owner = getOwnerJid(sock); 
+    if (!owner) return false;
+    
     const sender = msg.key?.participant || msg.key?.remoteJid;
-    if (sender && jidNumber(sender) === jidNumber(owner)) return false;
     if (msg.key?.fromMe === true) return false;
+    if (sender && jidNumber(sender) === jidNumber(owner)) return false;
+    
     const media = await downloadViewOnceMedia(sock, msg);
-    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.1`;
+    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.2`;
+    
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
+    logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
     return true;
-  } catch(e) { logger.error("AutoSave VV: "+e.message); return false; }
+  } catch(e) { 
+    logger.error("AutoSave VV Error: "+e.message); 
+    return false; 
+  }
 }
 
 async function handleViewOnce(sock, username, msg) {
@@ -369,30 +379,72 @@ async function handleSave(sock, username, msg) {
 }
 
 // ==========================================
-// NEW COMMAND HELPERS
+// GEMINI AI (AQ. Key Support)
 // ==========================================
-async function aiChat(query) {
-  try {
-    const url = `https://text.pollinations.ai/${encodeURIComponent(query)}`;
-    const r = await axios.get(url, { timeout: 30000 });
-    let text = typeof r.data === "string" ? r.data : JSON.stringify(r.data);
-    text = text.trim();
-    if (!text) throw new Error("Empty AI response");
-    return text.slice(0, 3500);
-  } catch (e) { throw new Error("AI service unavailable: " + e.message); }
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+let geminiClient = null;
+
+function getGeminiClient() {
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set in Railway Variables.");
+  if (!geminiClient) geminiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  return geminiClient;
 }
+
+async function aiChat(query, options = {}) {
+  const { mode = "chat", forceModel = null } = options;
+  try {
+    const ai = getGeminiClient();
+    let model = forceModel || (mode === "code" ? "gemini-2.5-pro" : "gemini-2.5-flash");
+    let config = { temperature: 0.7, maxOutputTokens: 2048 };
+
+    if (mode === "code") {
+      config.systemInstruction = "You are an expert coding assistant. Provide concise answers with working code examples. Always wrap code in triple backticks with the language name.";
+      config.temperature = 0.3;
+    } else {
+      config.systemInstruction = "You are DIMUWA MINI BOT, a friendly WhatsApp assistant. Answer helpfully in the language of the user (Sinhala, English, or Tamil). Keep answers concise unless asked for detail.";
+    }
+
+    const response = await ai.models.generateContent({ model: model, contents: query, config: config });
+    const text = (response.text || "").trim();
+    if (!text) throw new Error("Gemini returned empty response");
+    return text.length > 3500 ? text.slice(0, 3400) + "\n\n... [truncated]" : text;
+  } catch (e) {
+    logger.error("Gemini AI error: " + e.message);
+    throw new Error("AI error: " + e.message);
+  }
+}
+
+// ==========================================
+// OTHER COMMAND HELPERS
+// ==========================================
 async function aiImage(prompt) {
   const seed = Math.floor(Math.random()*1000000);
   const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}`;
   const res = await axios.get(url, { responseType: "arraybuffer", timeout: 60000 });
   return Buffer.from(res.data);
 }
+
 async function songSearch(name) {
-  const r = await axios.get("https://itunes.apple.com/search", { params: { term: name, media: "music", limit: 1 }, timeout: 20000 });
-  const item = r.data?.results?.[0];
-  if (!item) throw new Error("No song found");
-  return { title: item.trackName, artist: item.artistName, preview: item.previewUrl, artwork: item.artworkUrl100, album: item.collectionName };
+  try {
+    const searchUrl = `https://saavn.dev/api/search/songs?query=${encodeURIComponent(name)}&limit=1`;
+    const r = await axios.get(searchUrl, { timeout: 20000 });
+    const song = r.data?.data?.results?.[0];
+    if (!song) throw new Error("No song found");
+    
+    const audioUrl = song.downloadUrl?.find(x => x.quality === "320kbps")?.link 
+                  || song.downloadUrl?.[song.downloadUrl.length - 1]?.link;
+    const artwork = song.image?.[song.image.length - 1]?.link;
+
+    return {
+      title: song.name,
+      artist: song.primaryArtists?.[0]?.name || "Unknown",
+      album: song.album?.name || "Single",
+      preview: audioUrl,
+      artwork: artwork
+    };
+  } catch (e) { throw new Error("Song search failed: " + e.message); }
 }
+
 async function translateText(text, targetLang = "si") {
   const langMap = { si:"sinhala", en:"english", ta:"tamil", hi:"hindi", es:"spanish", fr:"french", de:"german", ja:"japanese", ko:"korean", zh:"chinese", ar:"arabic", ru:"russian", pt:"portuguese", it:"italian", nl:"dutch" };
   const rev = { sinhala:"si", english:"en", tamil:"ta", hindi:"hi", spanish:"es", french:"fr", german:"de", japanese:"ja", korean:"ko", chinese:"zh", arabic:"ar", russian:"ru", portuguese:"pt", italian:"it", dutch:"nl" };
@@ -404,6 +456,7 @@ async function translateText(text, targetLang = "si") {
     throw new Error("Bad translate response");
   } catch(e) { throw new Error("Translation failed: "+e.message); }
 }
+
 async function getWeather(city) {
   const r = await axios.get("https://wttr.in/"+encodeURIComponent(city)+"?format=j1", { timeout: 20000 });
   const d = r.data;
@@ -411,6 +464,7 @@ async function getWeather(city) {
   if (!cur) throw new Error("City not found");
   return { city: d.nearest_area?.[0]?.areaName?.[0]?.value || city, country: d.nearest_area?.[0]?.country?.[0]?.value || "", temp: cur.temp_C, feels: cur.FeelsLikeC, humidity: cur.humidity, desc: cur.weatherDesc?.[0]?.value || "", wind: cur.windspeedKmph };
 }
+
 async function defineWord(word) {
   const r = await axios.get(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`, { timeout: 20000 });
   const entry = r.data?.[0];
@@ -421,13 +475,16 @@ async function defineWord(word) {
   }).join("\n\n");
   return { word: entry.word, phonetic: entry.phonetic || "", meanings };
 }
+
 async function convertCurrency(amount, from, to) {
   const r = await axios.get(`https://api.exchangerate-api.com/v4/latest/${from.toUpperCase()}`, { timeout: 20000 });
   const rate = r.data?.rates?.[to.toUpperCase()];
   if (!rate) throw new Error("Currency not supported");
   return { amount, from: from.toUpperCase(), to: to.toUpperCase(), rate, result: (Number(amount) * rate).toFixed(2) };
 }
+
 async function generateQR(text) { return await QRCode.toBuffer(text, { margin: 2, width: 500 }); }
+
 async function readQR(buffer) {
   const fd = new FormData();
   fd.append("file", buffer, { filename: "qr.png" });
@@ -436,27 +493,30 @@ async function readQR(buffer) {
   if (!data?.data) throw new Error("QR not detected");
   return data.data;
 }
+
 async function makeSticker(sock, msg, mediaBuffer) {
   try {
     const { Sticker, StickerTypes } = require("wa-sticker-formatter");
     const sticker = new Sticker(mediaBuffer, { pack: "DIMUWA", author: "DIMUTH SATHSARA", type: StickerTypes.FULL, quality: 70 });
     return await sticker.toBuffer();
-  } catch(e) { throw new Error("Sticker failed (install wa-sticker-formatter): " + e.message); }
+  } catch(e) { throw new Error("Sticker failed: " + e.message); }
 }
+
 async function textToVoice(text) {
   const lang = /[\u0D80-\u0DFF]/.test(text) ? "si" : "en";
   const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.slice(0,200))}&tl=${lang}&client=tw-ob`;
   const r = await axios.get(url, { responseType: "arraybuffer", timeout: 30000, headers: { "User-Agent": "Mozilla/5.0" } });
   return { buffer: Buffer.from(r.data), lang };
 }
+
 function safeCalc(expr) {
   const cleaned = expr.replace(/[^0-9+\-*/().%\s]/g, "");
   if (!cleaned.trim()) throw new Error("Invalid expression");
-  // eslint-disable-next-line no-new-func
   const result = Function(`"use strict";return (${cleaned})`)();
   if (typeof result !== "number" || !isFinite(result)) throw new Error("Invalid result");
   return result;
 }
+
 function parseReminderTime(str) {
   const m = str.match(/^(\d+)\s*(s|m|h|d)?$/i);
   if (!m) return null;
@@ -465,19 +525,18 @@ function parseReminderTime(str) {
   const mult = { s:1000, m:60000, h:3600000, d:86400000 }[unit];
   return n * mult;
 }
+
 function getRankInfo(xp) {
   const ranks = [
-    { name: "🥉 Bronze", min: 0 },
-    { name: "🥈 Silver", min: 100 },
-    { name: "🥇 Gold", min: 500 },
-    { name: "💎 Platinum", min: 1500 },
-    { name: "💠 Diamond", min: 5000 },
-    { name: "👑 Legendary", min: 15000 }
+    { name: "🥉 Bronze", min: 0 }, { name: "🥈 Silver", min: 100 },
+    { name: "🥇 Gold", min: 500 }, { name: "💎 Platinum", min: 1500 },
+    { name: "💠 Diamond", min: 5000 }, { name: "👑 Legendary", min: 15000 }
   ];
   let cur = ranks[0], next = null;
   for (let i=0;i<ranks.length;i++) if (xp >= ranks[i].min) { cur = ranks[i]; next = ranks[i+1] || null; }
   return { rank: cur.name, next: next ? `${next.name} (${next.min} XP)` : "MAX", progress: next ? `${xp - cur.min}/${next.min - cur.min}` : "MAX" };
 }
+
 async function applyBassEffect(buffer) {
   const jobId = crypto.randomBytes(6).toString("hex");
   const inPath = path.join(MEDIA_DIR, `${jobId}_in`);
@@ -489,18 +548,16 @@ async function applyBassEffect(buffer) {
     await fsp.unlink(inPath).catch(()=>{});
     await fsp.unlink(outPath).catch(()=>{});
     return out;
-  } catch(e) {
-    await fsp.unlink(inPath).catch(()=>{});
-    throw new Error("Bass effect needs ffmpeg installed on server");
-  }
+  } catch(e) { await fsp.unlink(inPath).catch(()=>{}); throw new Error("Bass effect needs ffmpeg installed"); }
 }
+
 async function sendContact(sock, jid, name, phone, quoted) {
   const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${name}\nTEL;type=CELL;type=VOICE;waid=${normalizePhone(phone)}:+${normalizePhone(phone)}\nEND:VCARD`;
   return await sock.sendMessage(jid, { contacts: { displayName: name, contacts: [{ vcard }] } }, { quoted });
 }
 
 // ==========================================
-// SETTINGS MENU (EXACT DESIGN)
+// SETTINGS & MENUS
 // ==========================================
 function settingsMenu(u) {
   const s = getSettings(u);
@@ -605,7 +662,7 @@ async function processSettingsCode(sock, u, msg, code) {
 
 function menuText(u) {
   const s = getSettings(u);
-  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟭 🤖 👑
+  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
 
 ╭─── « 👨‍💻 𝗖𝗥𝗘𝗔𝗧𝗢𝗥 𝗜𝗡𝗙𝗢 » ───⬣
 │ 👨‍💻 𝗖𝗿𝗲𝗮𝘁𝗼𝗿 : Dimuth Sathsara
@@ -639,7 +696,7 @@ async function sendMenu(sock, u, jid, msg) {
 }
 
 // ==========================================
-// ALIVE COMMAND (image + voice + commands)
+// ALIVE COMMAND
 // ==========================================
 async function sendAlive(sock, username, jid, msg) {
   const s = getSettings(username);
@@ -652,7 +709,7 @@ async function sendAlive(sock, username, jid, msg) {
   const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
   const phone = jidNumber(getOwnerJid(sock));
 
-  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟭 🤖 👑
+  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
 
 ╭─── « 🟢 𝗕𝗢𝗧 𝗔𝗟𝗜𝗩𝗘 » ───⬣
 │ 🟢 𝗦𝘁𝗮𝘁𝘂𝘀   : Online ✅
@@ -711,7 +768,7 @@ async function sendAlive(sock, username, jid, msg) {
   try { await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption }, { quoted: msg }); }
   catch { await sock.sendMessage(jid, { text: caption }, { quoted: msg }); }
 
-  try { await sock.sendMessage(jid, { audio: { url: MENU_AUDIO_URL }, mimetype: "audio/mpeg", ptt: true }); } catch {}
+  try { await sock.sendMessage(jid, { audio: { url: MENU_AUDIO_URL }, mimetype: "audio/mpeg", ptt: false }); } catch {}
 }
 
 // ==========================================
@@ -821,7 +878,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// YT-DLP DOWNLOADER (AUDIO FIX)
+// YT-DLP DOWNLOADER
 // ==========================================
 function isSupportedUrl(url) { return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); }
 
@@ -928,29 +985,42 @@ async function executeDownload(sock, username, msg, url, type) {
 }
 
 // ==========================================
-// ANTI-DELETE
+// ANTI-DELETE (FIXED)
 // ==========================================
 async function handleDeletedMessages(username, sock, deletedKeys) {
   const s = getSettings(username);
   if (s.antiDelete !== "ON" || !Array.isArray(deletedKeys)) return;
+  
   for (const key of deletedKeys) {
     try {
-      const cached = getCachedMessage(key); if (!cached) continue;
+      const cached = getCachedMessage(key); 
+      if (!cached) continue;
+      
       const target = s.antiDelTarget === "SAME" ? key.remoteJid : getOwnerJid(sock);
       if (!target) continue;
+
       const t = getMessageText(cached);
       const media = getMediaInfo(cached.message);
+      const sender = jidNumber(key.participant || key.remoteJid);
+
       if (media) {
         try {
           const dm = await downloadWhatsAppMedia(sock, cached);
-          await sendWhatsAppMedia(sock, target, { ...dm, content: { ...dm.content, caption: `🗑️ *DELETED MEDIA*\n👤 From: ${jidNumber(key.participant || key.remoteJid)}\n\n${dm.content?.caption || ""}` } });
-        } catch { await sock.sendMessage(target, { text: `🗑️ *DELETED MEDIA*\n👤 From: ${jidNumber(key.participant || key.remoteJid)}` }); }
+          await sendWhatsAppMedia(sock, target, { 
+            ...dm, 
+            content: { ...dm.content, caption: `🗑️ *DELETED MEDIA*\n👤 From: ${sender}\n\n${dm.content?.caption || ""}` } 
+          });
+        } catch { 
+          await sock.sendMessage(target, { text: `🗑️ *DELETED MEDIA*\n👤 From: ${sender}` }); 
+        }
       } else if (t) {
-        await sock.sendMessage(target, { text: `🗑️ *DELETED MSG*\n👤 From: ${jidNumber(key.participant || key.remoteJid)}\n\n${t}` });
+        await sock.sendMessage(target, { text: `🗑️ *DELETED MSG*\n👤 From: ${sender}\n\n${t}` });
       } else {
-        await sock.sendMessage(target, { forward: cached });
+        try { await sock.sendMessage(target, { forward: cached }); } catch {}
       }
-    } catch {}
+    } catch (e) {
+      logger.error("AntiDelete error: " + e.message);
+    }
   }
 }
 
@@ -966,42 +1036,63 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     const q = text.slice(3).trim();
     if (!q) { await sock.sendMessage(jid, { text: "❌ Usage: .ai <question>" }, { quoted: msg }); return true; }
     await sock.sendMessage(jid, { text: "🤖 Thinking..." }, { quoted: msg });
-    try { const r = await aiChat(q); await sock.sendMessage(jid, { text: `🤖 *AI Answer:*\n\n${r}` }, { quoted: msg }); }
+    try { const r = await aiChat(q, { mode: "chat" }); await sock.sendMessage(jid, { text: `🤖 *AI Answer:*\n\n${r}` }, { quoted: msg }); }
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+  
   if (cmd === ".code") {
     if (s.codingHelper !== "ON") return false;
     const q = text.slice(5).trim();
     if (!q) { await sock.sendMessage(jid, { text: "❌ Usage: .code <question>" }, { quoted: msg }); return true; }
     await sock.sendMessage(jid, { text: "💻 Thinking..." }, { quoted: msg });
-    try { const r = await aiChat("You are a helpful coding assistant. Answer concisely with code examples.\n\nQuestion: " + q); await sock.sendMessage(jid, { text: `💻 *Code Help:*\n\n${r}` }, { quoted: msg }); }
+    try { const r = await aiChat(q, { mode: "code" }); await sock.sendMessage(jid, { text: `💻 *Code Help:*\n\n${r}` }, { quoted: msg }); }
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".song") {
     if (s.songSearch !== "ON") return false;
     const q = text.slice(5).trim();
     if (!q) { await sock.sendMessage(jid, { text: "❌ Usage: .song <name>" }, { quoted: msg }); return true; }
+    
+    await sock.sendMessage(jid, { text: "🔍 Searching song..." }, { quoted: msg });
     try {
       const song = await songSearch(q);
-      const caption = `🎵 *${song.title}*\n👤 ${song.artist}\n💿 ${song.album}`;
+      if (!song.preview) throw new Error("Audio URL not found for this song");
+
+      const caption = `🎵 *Title:* ${song.title}\n👤 *Artist:* ${song.artist}\n💿 *Album:* ${song.album}\n\n🔗 *Audio URL:*\n${song.preview}`;
+      await sock.sendMessage(jid, { image: { url: song.artwork }, caption: caption }, { quoted: msg });
+
       try {
-        const audioRes = await axios.get(song.preview, { responseType: "arraybuffer", timeout: 30000 });
-        await sock.sendMessage(jid, { audio: Buffer.from(audioRes.data), mimetype: "audio/mp4", caption }, { quoted: msg });
-      } catch { await sock.sendMessage(jid, { image: { url: song.artwork }, caption: caption + "\n\n" + song.preview }, { quoted: msg }); }
+        const audioRes = await axios.get(song.preview, { responseType: "arraybuffer", timeout: 40000 });
+        await sock.sendMessage(jid, { audio: Buffer.from(audioRes.data), mimetype: "audio/mp4", ptt: false }, { quoted: msg });
+      } catch (err) { logger.warn("Audio download failed: " + err.message); }
+
     } catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".translate") {
     if (s.translator !== "ON") return false;
-    const parts = text.split(/\s+/).slice(1);
-    if (parts.length < 2) { await sock.sendMessage(jid, { text: "❌ Usage: .translate <lang> <text>" }, { quoted: msg }); return true; }
-    const lang = parts[0]; const body = text.slice(11 + lang.length).trim();
-    try { const r = await translateText(body, lang); await sock.sendMessage(jid, { text: `🌍 *Translation (${lang})*\n\n${r}` }, { quoted: msg }); }
-    catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
+    const parts = text.split(/\s+/);
+    const lang = parts[1];
+    if (!lang) { await sock.sendMessage(jid, { text: "❌ Usage:\n.translate <lang> <text>\nහෝ\nMessage එකකට reply කරලා .translate <lang> දාන්න" }, { quoted: msg }); return true; }
+
+    let body = text.slice(10 + lang.length).trim();
+    const quoted = getQuotedMessage(msg);
+    if (!body && quoted) body = getMessageText(quoted).trim();
+
+    if (!body) { await sock.sendMessage(jid, { text: "❌ පරිවර්තනය කරන්න text එකක් නෑ." }, { quoted: msg }); return true; }
+
+    await sock.sendMessage(jid, { text: "🌍 Translating..." }, { quoted: msg });
+    try {
+      const r = await translateText(body, lang);
+      await sock.sendMessage(jid, { text: `🌍 *Translation (${lang})*\n\n${r}` }, { quoted: msg });
+    } catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".contact") {
     if (s.contactCard !== "ON") return false;
     const parts = text.slice(8).trim().split(",");
@@ -1010,6 +1101,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".autoreact") {
     const arg = args[1]?.toLowerCase();
     if (!["on","off"].includes(arg)) { await sock.sendMessage(jid, { text: "❌ Usage: .autoreact <on/off>" }, { quoted: msg }); return true; }
@@ -1018,6 +1110,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     await sock.sendMessage(jid, { text: `✅ Auto-React: *${s.autoReact}*` }, { quoted: msg });
     return true;
   }
+
   if (cmd === ".qr") {
     if (s.qrGenerator !== "ON") return false;
     const q = text.slice(3).trim();
@@ -1026,6 +1119,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".calc") {
     if (s.calculator !== "ON") return false;
     const expr = text.slice(5).trim();
@@ -1034,6 +1128,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".imagine") {
     if (s.aiImage !== "ON") return false;
     const p = text.slice(8).trim();
@@ -1043,6 +1138,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".stickerpack" || cmd === ".sticker") {
     if (s.stickerMaker !== "ON") return false;
     const q = getQuotedMessage(msg) || msg;
@@ -1054,6 +1150,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     } catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".voice") {
     if (s.textToVoice !== "ON") return false;
     const t = text.slice(6).trim();
@@ -1062,6 +1159,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".remind") {
     if (s.reminder !== "ON") return false;
     const parts = text.slice(7).trim().split(/\s+/);
@@ -1072,6 +1170,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     await sock.sendMessage(jid, { text: `✅ Reminder set in ${timeStr}` }, { quoted: msg });
     return true;
   }
+
   if (cmd === ".rank") {
     if (s.rank !== "ON") return false;
     const u = msg.key.participant || msg.key.remoteJid;
@@ -1080,6 +1179,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     await sock.sendMessage(jid, { text: `🏆 *RANK INFO*\n\n👤 User: ${jidNumber(u)}\n⭐ XP: ${xp}\n🎖 Rank: ${info.rank}\n📈 Progress: ${info.progress}\n🎯 Next: ${info.next}` }, { quoted: msg });
     return true;
   }
+
   if (cmd === ".weather") {
     if (s.weather !== "ON") return false;
     const city = text.slice(9).trim();
@@ -1088,6 +1188,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".readqr") {
     if (s.qrReader !== "ON") return false;
     const q = getQuotedMessage(msg) || msg;
@@ -1099,6 +1200,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     } catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".convert") {
     if (s.currencyConv !== "ON") return false;
     const parts = text.slice(9).trim().split(/\s+/);
@@ -1107,6 +1209,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".media") {
     if (s.mediaInfo !== "ON") return false;
     const q = getQuotedMessage(msg) || msg;
@@ -1117,6 +1220,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     await sock.sendMessage(jid, { text: `ℹ️ *MEDIA INFO*\n\n📁 Type: ${info.mediaType}\n📏 Size: ${size}\n📝 Mime: ${c.mimetype || "unknown"}\n🕐 Duration: ${c.seconds || "-"}s` }, { quoted: msg });
     return true;
   }
+
   if (cmd === ".antispam") {
     const arg = args[1]?.toLowerCase();
     if (!["on","off"].includes(arg)) { await sock.sendMessage(jid, { text: "❌ Usage: .antispam <on/off>" }, { quoted: msg }); return true; }
@@ -1125,6 +1229,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     await sock.sendMessage(jid, { text: `✅ Anti-Spam: *${s.antiSpam}*` }, { quoted: msg });
     return true;
   }
+
   if (cmd === ".define") {
     if (s.dictionary !== "ON") return false;
     const w = text.slice(8).trim();
@@ -1133,6 +1238,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".bass") {
     if (s.bassEffect !== "ON") return false;
     const q = getQuotedMessage(msg) || msg;
@@ -1145,6 +1251,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     } catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
+
   if (cmd === ".uptime") {
     if (s.uptime !== "ON") return false;
     const st = getStats(username);
@@ -1179,18 +1286,11 @@ async function handleMessage(username, sock, msg) {
   const s = getSettings(username);
   if (s.autoRead === "ON" && !msg.key.fromMe) await sock.readMessages([msg.key]).catch(()=>{});
 
-  // ✅ Auto-react (FIXED)
   if (s.autoReact === "ON" && msg.message && !msg.message.protocolMessage && !msg.message.reactionMessage) {
     try {
       const emoji = statusReactList[Math.floor(Math.random() * statusReactList.length)];
-      const reactKey = {
-        remoteJid: msg.key.remoteJid,
-        fromMe: msg.key.fromMe || false,
-        id: msg.key.id,
-        participant: msg.key.participant || undefined
-      };
+      const reactKey = { remoteJid: msg.key.remoteJid, fromMe: msg.key.fromMe || false, id: msg.key.id, participant: msg.key.participant || undefined };
       await sock.sendMessage(msg.key.remoteJid, { react: { text: emoji, key: reactKey } });
-      logger.info(`[AUTO REACT] ${emoji} → ${msg.key.remoteJid}`);
     } catch (e) { logger.warn("Auto react failed: " + e.message); }
   }
 
@@ -1262,7 +1362,7 @@ async function handleMessage(username, sock, msg) {
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
-      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.1` }, { quoted: msg });
+      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.2` }, { quoted: msg });
       return;
     }
   }
@@ -1271,7 +1371,7 @@ async function handleMessage(username, sock, msg) {
 }
 
 // ==========================================
-// BOT CONNECTION
+// BOT CONNECTION (WITH OWNER JID FIX)
 // ==========================================
 async function startBot(username, opts = {}) {
   const clean = cleanUsername(username);
@@ -1316,6 +1416,18 @@ async function startBot(username, opts = {}) {
         getStats(clean).connectedAt = Date.now(); saveStats();
         const s = getSettings(clean);
         await sock.sendPresenceUpdate(s.alwaysOnline === "ON" ? "available" : "unavailable").catch(()=>{});
+
+        // ✅ OWNER JID FIX (LID support)
+        try {
+          const phone = jidNumber(sock.user.id);
+          const tempMsg = await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: "Initializing..." });
+          if (tempMsg && tempMsg.key && tempMsg.key.remoteJid) {
+            sock.__realOwnerJid = tempMsg.key.remoteJid;
+            logger.info(`✅ Owner Inbox JID Saved: ${sock.__realOwnerJid}`);
+            await sock.sendMessage(tempMsg.key.remoteJid, { delete: tempMsg.key });
+          }
+        } catch (e) { logger.warn("Could not fetch real owner JID: " + e.message); }
+
         try {
           const ownerJid = getOwnerJid(sock);
           const channelId = "0029VbDZDmx4inoi10evlP1M";
