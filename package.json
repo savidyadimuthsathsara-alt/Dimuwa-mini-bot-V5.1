@@ -10,6 +10,7 @@
     "node": "20.x"
   },
   "dependencies": {
+    "@google/genai": "^1.30.0",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "axios": "^1.7.9",
     "cors": "^2.8.5",
