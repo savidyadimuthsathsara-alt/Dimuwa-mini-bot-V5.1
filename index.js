@@ -592,7 +592,7 @@ async function processSettingsCode(sock, u, msg, code) {
 
 function menuText(u) {
   const s = getSettings(u);
-  return `👋 *DIMUWA MINI BOT V5.2 ULTIMATE* 🤖
+  return `👋 *DIMUWA MINI BOT V5.1 ULTIMATE* 🤖
 
 👨‍💻 Creator: ${CREATOR_NAME}
 ⚙️ Prefix: .
