@@ -851,8 +851,17 @@ async function startBot(username, opts = {}) {
       if (connection === "close") {
         bots.delete(clean);
         const code = lastDisconnect?.error?.output?.statusCode;
+        logger.error({
+          username: clean,
+          statusCode: code,
+          disconnectMessage: lastDisconnect?.error?.message,
+          disconnectStack: lastDisconnect?.error?.stack
+        }, "WhatsApp connection closed");
+        qrStore.delete(clean);
         if (code === DisconnectReason.loggedOut) return;
-        setTimeout(() => startBot(clean).catch(()=>{}), 5000);
+        setTimeout(() => startBot(clean).catch(err => {
+          logger.error({ username: clean, err }, "WhatsApp reconnect failed");
+        }), 5000);
       }
     });
     
@@ -884,30 +893,57 @@ async function startBot(username, opts = {}) {
 // PAIRING CODE GENERATION
 // ==========================================
 async function getPairingCode(username, phone) {
-  const clean = cleanUsername(username); 
+  const clean = cleanUsername(username);
   const number = normalizePhone(phone);
-  
-  let sock = bots.get(clean); 
+
+  if (!/^\d{8,15}$/.test(number)) {
+    throw new Error("Enter a valid WhatsApp number with country code (digits only).");
+  }
+
+  let sock = bots.get(clean);
   if (!sock) sock = await startBot(clean);
-  
   if (isConnected(sock)) return { connected: true };
   if (sock.__pairingRequest) return await sock.__pairingRequest;
-  
+
   sock.__pairingRequest = (async () => {
-    await new Promise(res => setTimeout(res, 3000));
     try {
-      const code = (await sock.requestPairingCode(number)).replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g).join("-");
-      return { connected: false, code };
+      // Wait briefly for Baileys' websocket before requesting a pairing code.
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        if (isConnected(sock)) return { connected: true };
+        const state = sock.ws?.readyState;
+        if (state === 1) break; // WebSocket.OPEN
+        if (state === 2 || state === 3) {
+          throw new Error("WhatsApp websocket closed before pairing started. Check Railway logs.");
+        }
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+
+      if (sock.ws?.readyState !== 1) {
+        throw new Error("WhatsApp connection did not become ready within 15 seconds. Check Railway logs.");
+      }
+      if (isConnected(sock)) return { connected: true };
+
+      const rawCode = await sock.requestPairingCode(number);
+      const chunks = String(rawCode || "").replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g);
+      if (!chunks?.length) throw new Error("WhatsApp returned an empty pairing code.");
+      return { connected: false, code: chunks.join("-") };
     } catch (e) {
-      logger.error({ err: e, username: clean }, "Pairing code request failed");
+      logger.error({
+        username: clean,
+        message: e?.message,
+        stack: e?.stack,
+        wsReadyState: sock.ws?.readyState,
+        connected: isConnected(sock)
+      }, "Pairing code request failed");
       throw new Error(`Pairing code failed: ${e.message || "WhatsApp connection is not ready"}`);
     }
   })();
-  
-  try { 
-    return await sock.__pairingRequest; 
-  } finally { 
-    sock.__pairingRequest = null; 
+
+  try {
+    return await sock.__pairingRequest;
+  } finally {
+    sock.__pairingRequest = null;
   }
 }
 
