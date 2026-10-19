@@ -3,7 +3,7 @@
 /*
   DIMUWA MINI BOT VERSION 5.1.0 (PREMIUM LIVE DASHBOARD)
   Creator: Dimuth Sathsara
-  Fixed: QR/Pairing, Anti-Delete, View Once Auto-Save, Status React, Settings, Ping
+  Fixed: Downloader (Auto-Update), View Once Auto-Save, Anti-Delete
 */
 
 const express = require("express");
@@ -284,7 +284,11 @@ function unwrapViewOnce(msg) {
   if (m.viewOnceMessage) m = m.viewOnceMessage.message;
   
   const innerType = getContentType(m);
-  if (m[innerType]?.viewOnce) return { type: innerType, content: m[innerType], innerMessage: m };
+  if (!innerType) return null;
+  
+  if (m[innerType]?.viewOnce) {
+    return { type: innerType, content: m[innerType], innerMessage: m };
+  }
   return null;
 }
 
@@ -337,7 +341,13 @@ async function downloadViewOnceMedia(sock, msg) {
   const vo = unwrapViewOnce(msg);
   if (!vo) throw new Error("Not a view-once message.");
   
-  const buffer = await downloadMediaMessage({ key: msg.key, message: vo.innerMessage }, "buffer", {}, { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) });
+  const buffer = await downloadMediaMessage(
+    { key: msg.key, message: vo.innerMessage }, 
+    "buffer", 
+    {}, 
+    { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
+  );
+  
   const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
   
   return { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
@@ -377,6 +387,7 @@ function canProcessMessage(sock, username, msg) {
 async function handleAutoSaveViewOnce(username, sock, msg) {
   try {
     const s = getSettings(username);
+    
     if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg) || msg.key?.fromMe) return false;
     
     const owner = getOwnerJid(sock);
@@ -386,8 +397,9 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
     
     const media = await downloadViewOnceMedia(sock, msg);
     
-    // Target selection based on settings
-    const targetJid = s.vvTarget === "SAME" ? msg.key.remoteJid : owner;
+    // අනිවාර්යයෙන්ම Owner ගේ ඉන්බොක්ස් එකට යවන්න
+    const targetJid = owner; 
+    
     const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.1`;
     
     await sendWhatsAppMedia(sock, targetJid, { ...media, content: { ...media.content, caption } });
@@ -599,7 +611,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// YT-DLP DOWNLOADER
+// YT-DLP DOWNLOADER (AUTO UPDATE)
 // ==========================================
 function isSupportedUrl(url) { 
   return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); 
@@ -607,7 +619,18 @@ function isSupportedUrl(url) {
 
 async function ensureYtDlp() {
   const binary = path.join(TOOLS_DIR, "yt-dlp");
-  if (fs.existsSync(binary)) return binary;
+  
+  // ෆයිල් එක තියෙනවා නම්, ඒක අන්තිමට අප්ඩේට් වුණේ අදද කියලා බලනවා
+  if (fs.existsSync(binary)) {
+    const stats = fs.statSync(binary);
+    const now = Date.now();
+    const ageInHours = (now - stats.mtimeMs) / (1000 * 60 * 60);
+    
+    // පැය 24කට වඩා පරණ නම්, අලුතින් ඩවුන්ලෝඩ් කරනවා
+    if (ageInHours < 24) {
+      return binary; 
+    }
+  }
   
   const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux${process.arch === "arm64" ? "_aarch64" : ""}`;
   
@@ -733,14 +756,17 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
 async function handleMessage(username, sock, msg) {
   if (!msg?.message || !msg?.key) return;
   
+  // 1. Anti-Delete Detect
   const protocolMsg = msg.message.protocolMessage;
   if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === "REVOKE")) {
-    if (protocolMsg.key) {
-      await handleDeletedMessages(username, sock, [protocolMsg.key]);
+    const deletedKey = protocolMsg.key;
+    if (deletedKey) {
+      await handleDeletedMessages(username, sock, [deletedKey]);
     }
     return;
   }
   
+  // 2. Status Read
   if (msg.key.remoteJid === "status@broadcast") {
     await handleStatus(username, sock, msg);
     return;
@@ -748,6 +774,7 @@ async function handleMessage(username, sock, msg) {
   
   if (msg.key.remoteJid === "broadcast") return;
 
+  // 3. Cache Message
   cacheMessage(msg); 
   incrementStat(username, "messages");
   
@@ -757,16 +784,19 @@ async function handleMessage(username, sock, msg) {
     await sock.readMessages([msg.key]).catch(()=>{});
   }
   
+  // 4. View Once Auto Save
   await handleAutoSaveViewOnce(username, sock, msg);
 
   const text = getMessageText(msg).trim(); 
   if (!text) return;
   
+  // 5. Settings Code
   const setCode = text.match(/^\s*(\d{1,2}\.\d)\s*$/);
   if (setCode) {
     return await processSettingsCode(sock, username, msg, setCode[1]);
   }
   
+  // 6. Downloader Reply
   const quoted = getQuotedMessage(msg);
   if (quoted) {
     const qText = getMessageText(quoted);
@@ -781,6 +811,7 @@ async function handleMessage(username, sock, msg) {
     }
   }
 
+  // 7. Menu Numbers
   if (/^[1-7]$/.test(text)) {
     const handledMenu = await handleMenuNumber(sock, username, msg.key.remoteJid, text, msg);
     if (handledMenu) return; 
@@ -792,6 +823,7 @@ async function handleMessage(username, sock, msg) {
     await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{});
   }
 
+  // 8. Commands
   const cmd = text.split(/\s+/)[0].toLowerCase();
   if (cmd.startsWith(".")) incrementStat(username, "commands");
 
@@ -818,6 +850,7 @@ async function handleMessage(username, sock, msg) {
     }
   }
   
+  // 9. URL Detect
   const urlMatches = text.match(/https?:\/\/[^\s]+/i);
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
