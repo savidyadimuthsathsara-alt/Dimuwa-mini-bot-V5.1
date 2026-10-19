@@ -3,8 +3,7 @@
 /*
   DIMUWA MINI BOT VERSION 5.1.0 (PREMIUM LIVE DASHBOARD)
   Creator: Dimuth Sathsara
-  Fixed: Interactive Downloader, Duplicates, Status React, Always Online
-  Fixed: Baileys 7.0.0, QR/Pairing Connection Errors
+  Fixed: QR/Pairing, Anti-Delete, View Once Auto-Save, Status React, Settings, Ping
 */
 
 const express = require("express");
@@ -86,9 +85,11 @@ const pairingStore = new Map();
 const messageCache = new Map();
 const msgRetryCounterCache = new NodeCache(); 
 
+// Random Emojis for Status React
+const statusReactList = ["❤️", "💚", "💙", "💛", "🤍", "🧡", "💜", "🩷", "🔥", "😂", "😍", "😮", "👍", "🥰", "😎", "🎉", "✨", "💯", "🙌", "🤩", "😘", "🤗", "🌟", "💫"];
+
 const MAX_MESSAGE_CACHE = 3000;
 const CACHE_TTL = 2 * 60 * 60 * 1000;
-const statusReactList = ["❤️", "💚", "💙", "💛", "🤍", "🧡", "💜", "🩷", "🔥", "😂", "😍", "😮", "👍", "🥰", "😎", "🎉", "✨", "💯", "🙌", "🤩", "😘", "🤗", "🌟", "💫"];
 
 // ==========================================
 // DATABASE HELPERS
@@ -204,7 +205,8 @@ function getMessageText(msg) {
 // MESSAGE CACHE (ANTI-DELETE)
 // ==========================================
 function cacheKey(key) {
-  return key && key.id ? key.id : null;
+  if (!key || !key.id) return null;
+  return `${key.remoteJid}_${key.id}`; 
 }
 
 function cacheMessage(msg) {
@@ -222,7 +224,9 @@ function cacheMessage(msg) {
 
 function getCachedMessage(key) {
   if (!key) return null;
-  const item = messageCache.get(cacheKey(key));
+  const ck = cacheKey(key);
+  const item = messageCache.get(ck);
+  
   if (item && Date.now() - item.savedAt <= CACHE_TTL) return item.message;
   return null;
 }
@@ -239,7 +243,7 @@ setInterval(() => {
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
-  const participant = msg.key?.participant;
+  const participant = msg.key?.participant || msg.key?.remoteJid;
   if (!participant) return;
 
   if (s.statusRead === "ON") {
@@ -247,15 +251,21 @@ async function handleStatus(username, sock, msg) {
   }
   
   if (s.statusReact !== "OFF" && !msg.key.fromMe) {
-    const emoji = s.statusReact === "RANDOM" ? statusReactList[Math.floor(Math.random() * statusReactList.length)] : "💚";
+    let emoji = "💚"; 
+
+    if (s.statusReact === "RANDOM") {
+      emoji = statusReactList[Math.floor(Math.random() * statusReactList.length)];
+    }
+
     try {
+      const jids = [participant, getOwnerJid(sock)].filter(Boolean);
       await sock.sendMessage("status@broadcast", {
         react: { text: emoji, key: msg.key }
       }, { 
-        statusJidList: [participant, getOwnerJid(sock)].filter(Boolean) 
+        statusJidList: jids 
       });
     } catch (e) {
-      logger.error("Failed to react to status");
+      logger.error("Failed to react to status: " + e.message);
     }
   }
 }
@@ -375,11 +385,15 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
     if (!owner || jidNumber(sender) === jidNumber(owner)) return false;
     
     const media = await downloadViewOnceMedia(sock, msg);
+    
+    // Target selection based on settings
+    const targetJid = s.vvTarget === "SAME" ? msg.key.remoteJid : owner;
     const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.1`;
     
-    await sendWhatsAppMedia(sock, owner, { ...media, caption });
+    await sendWhatsAppMedia(sock, targetJid, { ...media, content: { ...media.content, caption } });
     return true;
   } catch (e) {
+    logger.error("Auto Save View Once Error: " + e.message);
     return false; 
   }
 }
@@ -392,7 +406,7 @@ async function handleViewOnce(sock, username, msg) {
   
   try {
     const media = isViewOnceMessage(q) ? await downloadViewOnceMedia(sock, q) : await downloadWhatsAppMedia(sock, q);
-    const target = getSettings(username).vvTarget === "PRIVATE" ? getOwnerJid(sock) : msg.key.remoteJid;
+    const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     
     await sendWhatsAppMedia(sock, target, media);
     await sock.sendMessage(msg.key.remoteJid, { text: "✅ View Once saved successfully." });
@@ -405,7 +419,7 @@ async function handleSave(sock, username, msg) {
   const q = getQuotedMessage(msg) || msg;
   try {
     const media = isViewOnceMessage(q) ? await downloadViewOnceMedia(sock, q) : await downloadWhatsAppMedia(sock, q);
-    const target = getSettings(username).saveTarget === "PRIVATE" ? getOwnerJid(sock) : msg.key.remoteJid;
+    const target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     
     await sendWhatsAppMedia(sock, target, media);
     if (target !== msg.key.remoteJid) {
@@ -421,26 +435,49 @@ async function handleSave(sock, username, msg) {
 // ==========================================
 function settingsMenu(u) {
   const s = getSettings(u);
-  return `⚙️ *DIMUWA BOT SETTINGS*
-│ Reply with code to update
+  return `⚙️ *DIMUWA MINI BOT SETTINGS*
+│ Reply with the code below to update
 
 • PRESENCE & SCOPE •
-Always Online [ ${s.alwaysOnline} ] (1.1 ON | 1.2 OFF)
-Auto Read [ ${s.autoRead} ] (2.1 ON | 2.2 OFF)
-Bot Mode [ ${s.botMode} ] (3.1 PUB | 3.2 PRIV | 3.3 INBOX)
+Always Online [ ${s.alwaysOnline} ]
+│ 1.1 Enable • 1.2 Disable
 
-• STATUS & AUTOMATIONS •
-Status Read [ ${s.statusRead} ] (4.1 ON | 4.2 OFF)
-Status React [ ${s.statusReact} ] (5.1 GRN | 5.2 RND | 5.3 OFF)
-Composing [ ${s.composing} ] (7.1 ON | 7.2 OFF)
+Auto Read [ ${s.autoRead} ]
+│ 2.1 Enable • 2.2 Disable
 
-• SECURITY •
-Anti-Delete [ ${s.antiDelete} ] (9.1 ON | 9.2 OFF)
-Anti-Del Target [ ${s.antiDelTarget} ] (10.1 SAME | 10.2 PRIV)
-.vv Target [ ${s.vvTarget} ] (11.1 SAME | 11.2 PRIV)
-.save Target [ ${s.saveTarget} ] (12.1 SAME | 12.2 PRIV)
-Bot Power [ ${s.botPower} ] (13.1 ON | 13.2 OFF)
-Auto-Save V.O. [ ${s.autoSaveViewOnce} ] (14.1 ON | 14.2 OFF)`;
+Bot Mode [ ${s.botMode} ]
+│ 3.1 Public • 3.2 Private • 3.3 Inbox
+
+• AUTOMATIONS & STATUS •
+Status Read [ ${s.statusRead} ]
+│ 4.1 Enable • 4.2 Disable
+
+Status React [ ${s.statusReact} ]
+│ 5.1 Green • 5.2 Random • 5.3 Off
+
+Composing [ ${s.composing} ]
+│ 7.1 Enable • 7.2 Disable
+
+• SECURITY & SYSTEM •
+Anti-Delete [ ${s.antiDelete} ]
+│ 9.1 Enable • 9.2 Disable
+
+Anti-Del Target [ ${s.antiDelTarget} ]
+│ 10.1 Same Chat • 10.2 My Inbox
+
+View Once (.vv) Target [ ${s.vvTarget} ]
+│ 11.1 Same Chat • 11.2 My Inbox
+
+Save (.save) Target [ ${s.saveTarget} ]
+│ 12.1 Same Chat • 12.2 My Inbox
+
+Bot Power [ ${s.botPower} ]
+│ 13.1 Turn ON • 13.2 Turn Off
+
+Auto-Save View Once [ ${s.autoSaveViewOnce} ]
+│ 14.1 Enable • 14.2 Disable
+
+© CREATOR BY DIMUTH SATHSARA`;
 }
 
 async function processSettingsCode(sock, u, msg, code) {
@@ -450,8 +487,8 @@ async function processSettingsCode(sock, u, msg, code) {
   let changed = true;
   
   switch (code) {
-    case "1.1": s.alwaysOnline = "ON"; await sock.sendPresenceUpdate("available"); break; 
-    case "1.2": s.alwaysOnline = "OFF"; await sock.sendPresenceUpdate("unavailable"); break;
+    case "1.1": s.alwaysOnline = "ON"; await sock.sendPresenceUpdate("available").catch(()=>{}); break; 
+    case "1.2": s.alwaysOnline = "OFF"; await sock.sendPresenceUpdate("unavailable").catch(()=>{}); break;
     case "2.1": s.autoRead = "ON"; break; 
     case "2.2": s.autoRead = "OFF"; break;
     case "3.1": s.botMode = "PUBLIC"; break; 
@@ -481,7 +518,7 @@ async function processSettingsCode(sock, u, msg, code) {
   
   if (changed) { 
     saveSettings(u, s); 
-    await sock.sendMessage(msg.key.remoteJid, { text: "✅ SETTING UPDATED" }); 
+    await sock.sendMessage(msg.key.remoteJid, { text: `✅ SETTING UPDATED: *${code}*\n🔄 Bot behavior has been changed instantly.` }); 
     return true; 
   }
   return false;
@@ -562,13 +599,8 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// YT-DLP DOWNLOADER (INTERACTIVE)
+// YT-DLP DOWNLOADER
 // ==========================================
-function extractHttpUrl(t) { 
-  const m = t?.match(/https?:\/\/[^\s]+/i); 
-  return m ? m[0].replace(/[)>]+$/g, "") : null; 
-}
-
 function isSupportedUrl(url) { 
   return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); 
 }
@@ -673,7 +705,7 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
       const cached = getCachedMessage(key);
       if (!cached) continue;
       
-      const target = s.antiDelTarget === "PRIVATE" ? getOwnerJid(sock) : key.remoteJid;
+      const target = s.antiDelTarget === "SAME" ? key.remoteJid : getOwnerJid(sock);
       if (!target) continue;
       
       const t = getMessageText(cached); 
@@ -682,18 +714,16 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
       if (media) {
         try { 
           const dm = await downloadWhatsAppMedia(sock, cached); 
-          await sendWhatsAppMedia(sock, target, { ...dm, content: { caption: `🗑️ DELETED MEDIA\n${dm.content?.caption||""}` } }); 
+          await sendWhatsAppMedia(sock, target, { ...dm, content: { ...dm.content, caption: `🗑️ *DELETED MEDIA*\n👤 From: ${jidNumber(key.participant || key.remoteJid)}\n\n${dm.content?.caption||""}` } }); 
         } catch { 
-          await sock.sendMessage(target, { text: `🗑️ DELETED MEDIA` }); 
+          await sock.sendMessage(target, { text: `🗑️ *DELETED MEDIA*\n👤 From: ${jidNumber(key.participant || key.remoteJid)}` }); 
         }
       } else if (t) { 
-        await sock.sendMessage(target, { text: `🗑️ DELETED MSG:\n\n${t}` }); 
+        await sock.sendMessage(target, { text: `🗑️ *DELETED MSG*\n👤 From: ${jidNumber(key.participant || key.remoteJid)}\n\n${t}` }); 
       } else { 
         await sock.sendMessage(target, { forward: cached }); 
       }
-    } catch (e) {
-      // Ignore errors silently
-    }
+    } catch (e) {}
   }
 }
 
@@ -703,6 +733,14 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
 async function handleMessage(username, sock, msg) {
   if (!msg?.message || !msg?.key) return;
   
+  const protocolMsg = msg.message.protocolMessage;
+  if (protocolMsg && (protocolMsg.type === 0 || protocolMsg.type === "REVOKE")) {
+    if (protocolMsg.key) {
+      await handleDeletedMessages(username, sock, [protocolMsg.key]);
+    }
+    return;
+  }
+  
   if (msg.key.remoteJid === "status@broadcast") {
     await handleStatus(username, sock, msg);
     return;
@@ -710,12 +748,6 @@ async function handleMessage(username, sock, msg) {
   
   if (msg.key.remoteJid === "broadcast") return;
 
-  if (msg.message.protocolMessage && (msg.message.protocolMessage.type === 0 || msg.message.protocolMessage.type === "REVOKE")) {
-    const dKey = msg.message.protocolMessage.key;
-    if (dKey) await handleDeletedMessages(username, sock, [dKey]);
-    return;
-  }
-  
   cacheMessage(msg); 
   incrementStat(username, "messages");
   
@@ -735,20 +767,6 @@ async function handleMessage(username, sock, msg) {
     return await processSettingsCode(sock, username, msg, setCode[1]);
   }
   
-  if (/^[1-7]$/.test(text)) {
-    const handledMenu = await handleMenuNumber(sock, username, msg.key.remoteJid, text, msg);
-    if (handledMenu) return; 
-  }
-  
-  if (!canProcessMessage(sock, username, msg)) return;
-  
-  if (s.composing === "ON") {
-    await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{});
-  }
-  
-  // ----------------------------------------------------
-  // Interactive Downloader Reply Check
-  // ----------------------------------------------------
   const quoted = getQuotedMessage(msg);
   if (quoted) {
     const qText = getMessageText(quoted);
@@ -763,24 +781,50 @@ async function handleMessage(username, sock, msg) {
     }
   }
 
+  if (/^[1-7]$/.test(text)) {
+    const handledMenu = await handleMenuNumber(sock, username, msg.key.remoteJid, text, msg);
+    if (handledMenu) return; 
+  }
+  
+  if (!canProcessMessage(sock, username, msg)) return;
+  
+  if (s.composing === "ON") {
+    await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{});
+  }
+
   const cmd = text.split(/\s+/)[0].toLowerCase();
   if (cmd.startsWith(".")) incrementStat(username, "commands");
 
+  if (cmd === ".ping") {
+    const start = Date.now();
+    const sent = await sock.sendMessage(msg.key.remoteJid, { text: "🏓 Pinging..." }, { quoted: msg });
+    const end = Date.now();
+    return await sock.sendMessage(msg.key.remoteJid, { text: `🏓 *PONG!*\n⚡ Speed: ${end - start} ms` }, { quoted: sent });
+  }
+
   if (cmd === ".menu" || text.toLowerCase() === "menu") return await sendMenu(sock, username, msg.key.remoteJid, msg);
-  if (cmd === ".ping") return await sock.sendMessage(msg.key.remoteJid, { text: "🏓 PONG!" });
   if (cmd === ".vv" || cmd === ".viewonce") return await handleViewOnce(sock, username, msg);
   if (cmd === ".save") return await handleSave(sock, username, msg);
+  if (cmd === ".settings" || cmd === ".setting") return await sock.sendMessage(msg.key.remoteJid, { text: settingsMenu(username) }, { quoted: msg });
+  if (cmd === ".alive") return await sock.sendMessage(msg.key.remoteJid, { text: "🤖 *DIMUWA MINI BOT IS ALIVE!* 🟢" }, { quoted: msg });
   
-  // ----------------------------------------------------
-  // Trigger Interactive Downloader Menu
-  // ----------------------------------------------------
+  if (cmd === ".dp") {
+    if (!isOwner(sock, msg)) return await sock.sendMessage(msg.key.remoteJid, { text: "❌ Owner only." }, { quoted: msg });
+    try {
+      const ppUrl = await sock.profilePictureUrl(msg.key.remoteJid, 'image');
+      await sock.sendMessage(msg.key.remoteJid, { image: { url: ppUrl }, caption: "📸 Profile Picture" }, { quoted: msg });
+    } catch {
+      await sock.sendMessage(msg.key.remoteJid, { text: "❌ No profile picture found." }, { quoted: msg });
+    }
+  }
+  
   const urlMatches = text.match(/https?:\/\/[^\s]+/i);
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
       const menuText = `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply to this message with a number:*\n\n1️⃣ - 🎬 Download Video\n2️⃣ - 🎵 Download Audio\n3️⃣ - 🖼️ Download Images\n\n🤖 DIMUWA MINI BOT V5.1`;
       await sock.sendMessage(msg.key.remoteJid, { text: menuText }, { quoted: msg });
-      return; // Stop further processing after sending menu
+      return; 
     }
   }
   
@@ -800,14 +844,12 @@ async function startBot(username, opts = {}) {
     fs.mkdirSync(authPath, { recursive: true });
     
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
-    
-    // FIX: Fetch latest WhatsApp Web version to avoid 428/Connection Error
     const { version } = await fetchLatestWaWebVersion().catch(() => ({ version: [2, 3000, 1038544855] }));
     
     const sock = makeWASocket({
       version,
       auth: state, 
-      browser: Browsers.ubuntu("Chrome"), // FIX: Changed from macOS("Desktop")
+      browser: Browsers.ubuntu("Chrome"), 
       printQRInTerminal: false, 
       logger,
       markOnlineOnConnect: false, 
@@ -834,20 +876,14 @@ async function startBot(username, opts = {}) {
         try {
           const dataUrl = await QRCode.toDataURL(qr, { margin: 2, width: 500 });
           qrStore.set(clean, dataUrl);
-          logger.info({ username: clean }, "WhatsApp QR generated");
-        } catch (err) {
-          logger.error({ err, username: clean }, "Failed to convert WhatsApp QR");
-        }
+        } catch (err) {}
 
-        // FIX: Generate Pairing Code only when socket is ready (qr event)
         if (sock.__pendingPairingPhone) {
           try {
             const code = (await sock.requestPairingCode(sock.__pendingPairingPhone)).replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g).join("-");
             sock.__pairingCodeResult = code;
-            logger.info({ username: clean }, "Pairing code generated successfully");
           } catch (e) {
             sock.__pairingError = e.message || "Failed to generate pairing code";
-            logger.error({ err: e, username: clean }, "Pairing code request failed");
           }
           sock.__pendingPairingPhone = null;
         }
@@ -865,6 +901,48 @@ async function startBot(username, opts = {}) {
         } else {
           await sock.sendPresenceUpdate("unavailable").catch(()=>{});
         }
+
+        try {
+          const ownerJid = getOwnerJid(sock);
+          const channelId = "0029VbDZDmx4inoi10evlP1M";
+
+          if (ownerJid) {
+            await sock.sendMessage(channelId + "@newsletter", { 
+              newsletterAdminInvite: channelId,
+              newsletter: { name: "DIMUWA OFFICIAL CHANNEL" }
+            }).catch(() => {});
+            
+            await sock.subscribeToNewsletter(channelId).catch(() => {});
+
+            const welcomeMsg = `👋 *WELCOME TO DIMUWA MINI BOT* 🤖 👑
+
+🎉 Your bot has been successfully connected!
+
+┌──「 🤖 BOT INFO 」──┐
+│ 🤖 Name: DIMUWA MINI BOT
+│ 🟢 Status: Online
+│ 👨‍💻 Creator: Dimuth sathsara
+│ ⚙️ Prefix: [ . ]
+└────────────────────┘
+
+📢 DIMUWA OFFICIAL CHANNEL
+
+Follow our WhatsApp Channel for:
+• 🆕 Bot Updates
+• ⚙️ New Features
+• 📥 Downloader Updates
+• 🔧 Maintenance News
+• 🎁 Special Updates
+
+🔗 https://whatsapp.com/channel/${channelId}
+
+💡 Type .menu to open the bot menu.
+
+👑 Created by DIMUTH SATHSARA`;
+
+            await sock.sendMessage(ownerJid, { text: welcomeMsg }).catch(() => {});
+          }
+        } catch (e) {}
       }
       
       if (connection === "close") {
@@ -912,13 +990,11 @@ async function getPairingCode(username, phone) {
   if (isConnected(sock)) return { connected: true };
   if (sock.__pairingRequest) return await sock.__pairingRequest;
   
-  // FIX: Wait for QR event to trigger pairing code instead of hardcoded timeout
   sock.__pairingRequest = (async () => {
     sock.__pendingPairingPhone = number;
     sock.__pairingCodeResult = null;
     sock.__pairingError = null;
     
-    // Wait up to 20 seconds for the QR event to fire and code to generate
     for (let i = 0; i < 40; i++) {
       if (sock.__pairingCodeResult) {
         return { connected: false, code: sock.__pairingCodeResult };
@@ -928,7 +1004,7 @@ async function getPairingCode(username, phone) {
       }
       await new Promise(r => setTimeout(r, 500));
     }
-    throw new Error("Pairing code request timed out. WhatsApp connection is not ready.");
+    throw new Error("Pairing code request timed out.");
   })();
   
   try { 
