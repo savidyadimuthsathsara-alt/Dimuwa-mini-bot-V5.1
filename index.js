@@ -765,10 +765,20 @@ async function sendAlive(sock, username, jid, msg) {
 💡 Type .menu to see all options
 © 𝗗𝗜𝗠𝗨𝗧𝗛 𝗦𝗔𝗧𝗛𝗦𝗔𝗥𝗔`;
 
-  try { await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption }, { quoted: msg }); }
+    try { await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption }, { quoted: msg }); }
   catch { await sock.sendMessage(jid, { text: caption }, { quoted: msg }); }
 
-  try { await sock.sendMessage(jid, { audio: { url: MENU_AUDIO_URL }, mimetype: "audio/mpeg", ptt: false }); } catch {}
+  // ✅ Download audio as buffer to ensure it sends successfully
+  try {
+    const audioRes = await axios.get(MENU_AUDIO_URL, { responseType: "arraybuffer", timeout: 20000 });
+    await sock.sendMessage(jid, { 
+      audio: Buffer.from(audioRes.data), 
+      mimetype: "audio/mpeg", 
+      ptt: false 
+    });
+  } catch (e) {
+    logger.warn("Alive audio failed: " + e.message);
+  }
 }
 
 // ==========================================
