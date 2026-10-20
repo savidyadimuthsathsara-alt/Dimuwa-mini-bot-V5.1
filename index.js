@@ -1,18 +1,5 @@
 "use strict";
 
-/*
-  DIMUWA MINI BOT VERSION 5.4.0 (ULTIMATE FINAL FIX)
-  Fixes:
-   - Status React (sendMessage method)
-   - Song API (saavnapi + fallback)
-   - View Once (V3, ptv, mediaKey inject)
-   - Anti-Delete (messages.update)
-   - Voice Note (ogg/opus conversion)
-   - Gemini AI (AQ Key support + Pro/Flash routing)
-   - Alive Audio fixed
-   - Owner JID (@lid issue fixed for Inbox)
-*/
-
 const express = require("express");
 const cors = require("cors");
 const pino = require("pino");
@@ -220,9 +207,18 @@ async function handleStatus(username, sock, msg) {
     }
 
     try {
+      // FIXED: Removed statusJidList and formatted key correctly
       await sock.sendMessage("status@broadcast", {
-        react: { text: emoji, key: msg.key }
-      }, { statusJidList: [participant] });
+        react: { 
+          text: emoji, 
+          key: {
+            remoteJid: "status@broadcast",
+            fromMe: false,
+            id: msg.key.id,
+            participant: participant
+          }
+        }
+      });
       logger.info(`[STATUS REACT] ${emoji} → ${jidNumber(participant)}`);
     } catch (e) {
       logger.error("Status react failed: " + e.message);
@@ -415,9 +411,15 @@ async function aiChat(query, options = {}) {
 // ==========================================
 async function aiImage(prompt) {
   const seed = Math.floor(Math.random()*1000000);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}`;
-  const res = await axios.get(url, { responseType: "arraybuffer", timeout: 60000 });
-  return Buffer.from(res.data);
+  // FIXED: New Pollinations endpoint
+  const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}`;
+  try {
+    const res = await axios.get(url, { responseType: "arraybuffer", timeout: 60000, headers: { "User-Agent": "Mozilla/5.0" } });
+    return Buffer.from(res.data);
+  } catch (e) {
+    logger.error("Pollinations image failed: " + e.message);
+    throw new Error("Image generation failed. Please try again.");
+  }
 }
 
 async function translateText(text, targetLang = "si") {
@@ -477,7 +479,6 @@ async function makeSticker(sock, msg, mediaBuffer) {
   } catch(e) { throw new Error("Sticker failed: " + e.message); }
 }
 
-// ✅ FIXED TEXT TO VOICE (ogg/opus)
 async function textToVoice(text) {
   const lang = /[\u0D80-\u0DFF]/.test(text) ? "si" : "en";
   const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.slice(0,200))}&tl=${lang}&client=tw-ob`;
@@ -930,7 +931,8 @@ async function downloadSocialMedia(username, url, type) {
     "--no-warnings","--no-playlist","--restrict-filenames",
     "--no-check-certificates","--geo-bypass",
     "--socket-timeout","30","--retries","3","--max-filesize","100M",
-    "--extractor-args","youtube:player_client=android,web",
+    "--extractor-args","youtube:player_client=ios,android,web",
+    "--user-agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ...formatArgs,
     "-o", outputTemplate,
     "--print","after_move:filepath",
@@ -1424,7 +1426,6 @@ async function startBot(username, opts = {}) {
         const s = getSettings(clean);
         await sock.sendPresenceUpdate(s.alwaysOnline === "ON" ? "available" : "unavailable").catch(()=>{});
 
-        // ✅ OWNER JID FIX (LID support)
         try {
           const phone = jidNumber(sock.user.id);
           const tempMsg = await sock.sendMessage(`${phone}@s.whatsapp.net`, { text: "Initializing Auto-Save..." });
@@ -1458,7 +1459,6 @@ async function startBot(username, opts = {}) {
       for (const m of ev.messages || []) { if (m.message) handleMessage(clean, sock, m).catch(()=>{}); }
     });
 
-    // ✅ Anti-Delete Fixed (messages.update)
     sock.ev.on("messages.update", async (updates) => {
       for (const update of updates) {
         if (update.update.message === null) {
@@ -1467,7 +1467,6 @@ async function startBot(username, opts = {}) {
       }
     });
 
-    // Fallback (messages.delete)
     sock.ev.on("messages.delete", async (ev) => {
       const k = Array.isArray(ev) ? ev : ev.keys ? ev.keys : ev.key ? [ev.key] : [];
       await handleDeletedMessages(clean, sock, k);
