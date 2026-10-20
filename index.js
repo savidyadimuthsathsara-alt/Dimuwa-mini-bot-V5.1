@@ -3,12 +3,14 @@
 /*
   DIMUWA MINI BOT VERSION 5.1.0 (ULTIMATE FINAL FIX)
   Fixes:
-   - Status React (sendMessage method - 100% working)
-   - Song API changed to JioSaavn (saavn.dev fixed)
-   - Auto-save View Once (Media key fix)
-   - Owner JID (LID issue fixed for Inbox)
+   - Status React (sendMessage method)
+   - Song API (saavnapi + fallback)
+   - View Once (V3, ptv, mediaKey inject)
+   - Anti-Delete (messages.update)
+   - Voice Note (ogg/opus conversion)
    - Gemini AI (AQ Key support + Pro/Flash routing)
    - Alive Audio fixed
+   - Owner JID (@lid issue fixed for Inbox)
 */
 
 const express = require("express");
@@ -199,19 +201,17 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS (FIXED for Baileys v6.7.24 / v7)
+// STATUS (FIXED)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
   const participant = msg.key?.participant || msg.key?.remoteJid;
   if (!participant) return;
 
-  // 1. Status Read (View)
   if (s.statusRead === "ON") {
     await sock.readMessages([msg.key]).catch(() => {});
   }
 
-  // 2. Status React
   if (s.statusReact !== "OFF") {
     let emoji = "💚";
     if (s.statusReact === "RANDOM") {
@@ -219,18 +219,12 @@ async function handleStatus(username, sock, msg) {
     }
 
     try {
-      // ✅ FIX: Using sendMessage instead of relayMessage for proper status reaction
       await sock.sendMessage(
         "status@broadcast",
         {
           react: {
             text: emoji,
-            key: {
-              remoteJid: "status@broadcast",
-              fromMe: false,
-              id: msg.key.id,
-              participant: participant,
-            },
+            key: { remoteJid: "status@broadcast", fromMe: false, id: msg.key.id, participant: participant },
           },
         },
         {
@@ -256,6 +250,9 @@ function unwrapViewOnce(msg) {
   if (m.viewOnceMessageV2Extension) m = m.viewOnceMessageV2Extension.message;
   if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
   if (m.viewOnceMessage) m = m.viewOnceMessage.message;
+  if (m.viewOnceMessageV3) m = m.viewOnceMessageV3.message;
+  if (m.ptvMessage) m = m.ptvMessage;
+
   const it = getContentType(m); if (!it) return null;
   if (m[it]?.viewOnce) return { type: it, content: m[it], innerMessage: m };
   return null;
@@ -303,7 +300,15 @@ async function downloadViewOnceMedia(sock, msg) {
   const vo = unwrapViewOnce(msg); 
   if (!vo) throw new Error("Not view-once.");
   
+  const content = vo.content;
   const innerMsg = { key: msg.key, message: msg.message };
+  
+  if (!content.mediaKey) {
+    const m = normalizeMessageContent(msg.message) || msg.message;
+    const t = getContentType(m);
+    if (m[t]?.mediaKey) content.mediaKey = m[t].mediaKey;
+  }
+
   const buffer = await downloadMediaMessage(innerMsg, "buffer", {}, { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) });
   
   if (!buffer?.length) throw new Error("Empty view-once buffer.");
@@ -344,7 +349,7 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
     if (sender && jidNumber(sender) === jidNumber(owner)) return false;
     
     const media = await downloadViewOnceMedia(sock, msg);
-    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.3.1`;
+    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.4`;
     
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
     logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
@@ -394,7 +399,6 @@ async function aiChat(query, options = {}) {
   const { mode = "chat", forceModel = null } = options;
   try {
     const ai = getGeminiClient();
-    // ✅ ඔයාගේ අලුත් මොඩල්ස්
     let model = forceModel || (mode === "code" ? "gemini-3.1-pro" : "gemini-3.8-flash");
     let config = { temperature: 0.7, maxOutputTokens: 2048 };
 
@@ -425,26 +429,47 @@ async function aiImage(prompt) {
   return Buffer.from(res.data);
 }
 
-// ✅ FIXED SONG API
+// ✅ FIXED SONG API (with fallback)
 async function songSearch(name) {
   try {
-    const searchUrl = `https://jiosaavn-api-private.vercel.app/search/songs?query=${encodeURIComponent(name)}&limit=1`;
+    const searchUrl = `https://saavnapi-nine.vercel.app/song/?query=${encodeURIComponent(name)}`;
     const r = await axios.get(searchUrl, { timeout: 20000 });
-    const song = r.data?.data?.results?.[0];
-    if (!song) throw new Error("No song found");
     
+    const song = r.data?.results?.[0] || r.data?.[0];
+    if (!song) throw new Error("No song found");
+
     const audioUrl = song.downloadUrl?.find(x => x.quality === "320kbps")?.link 
-                  || song.downloadUrl?.[song.downloadUrl.length - 1]?.link;
-    const artwork = song.image?.[song.image.length - 1]?.link;
+                  || song.downloadUrl?.[song.downloadUrl.length - 1]?.link
+                  || song.media_url;
+    
+    const artwork = song.image?.[song.image.length - 1]?.link || song.image;
 
     return {
-      title: song.name,
-      artist: song.primaryArtists?.[0]?.name || "Unknown",
-      album: song.album?.name || "Single",
+      title: song.song || song.name || song.title,
+      artist: song.primaryArtists || song.artist || "Unknown",
+      album: song.album || "Single",
       preview: audioUrl,
       artwork: artwork
     };
-  } catch (e) { throw new Error("Song search failed: " + e.message); }
+  } catch (e) {
+    logger.warn("Primary Song API failed, trying fallback: " + e.message);
+    try {
+      const fallbackUrl = `https://musicstream-api.vercel.app/search?q=${encodeURIComponent(name)}`;
+      const r2 = await axios.get(fallbackUrl, { timeout: 20000 });
+      const song2 = r2.data?.[0];
+      if (!song2) throw new Error("No song found in fallback");
+      
+      return {
+        title: song2.title,
+        artist: song2.artist,
+        album: song2.album,
+        preview: song2.audio,
+        artwork: song2.image
+      };
+    } catch (e2) {
+      throw new Error("Song search failed: " + e2.message);
+    }
+  }
 }
 
 async function translateText(text, targetLang = "si") {
@@ -504,11 +529,27 @@ async function makeSticker(sock, msg, mediaBuffer) {
   } catch(e) { throw new Error("Sticker failed: " + e.message); }
 }
 
+// ✅ FIXED TEXT TO VOICE (ogg/opus)
 async function textToVoice(text) {
   const lang = /[\u0D80-\u0DFF]/.test(text) ? "si" : "en";
   const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.slice(0,200))}&tl=${lang}&client=tw-ob`;
   const r = await axios.get(url, { responseType: "arraybuffer", timeout: 30000, headers: { "User-Agent": "Mozilla/5.0" } });
-  return { buffer: Buffer.from(r.data), lang };
+  
+  const jobId = crypto.randomBytes(6).toString("hex");
+  const inPath = path.join(MEDIA_DIR, `${jobId}_in.mp3`);
+  const outPath = path.join(MEDIA_DIR, `${jobId}_out.ogg`);
+  
+  await fsp.writeFile(inPath, Buffer.from(r.data));
+  try {
+    await execFileAsync("ffmpeg", ["-y", "-i", inPath, "-c:a", "libopus", "-b:a", "32k", "-vbr", "on", "-compression_level", "10", "-frame_duration", "60", "-application", "voip", outPath], { timeout: 60000 });
+    const outBuffer = await fsp.readFile(outPath);
+    await fsp.unlink(inPath).catch(()=>{});
+    await fsp.unlink(outPath).catch(()=>{});
+    return { buffer: outBuffer, lang, mimetype: "audio/ogg; codecs=opus" };
+  } catch (e) {
+    await fsp.unlink(inPath).catch(()=>{});
+    throw new Error("Voice conversion failed: " + e.message);
+  }
 }
 
 function safeCalc(expr) {
@@ -698,7 +739,7 @@ async function sendMenu(sock, u, jid, msg) {
 }
 
 // ==========================================
-// ALIVE COMMAND (Audio FIXED)
+// ALIVE COMMAND
 // ==========================================
 async function sendAlive(sock, username, jid, msg) {
   const s = getSettings(username);
@@ -1166,7 +1207,11 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     if (s.textToVoice !== "ON") return false;
     const t = text.slice(6).trim();
     if (!t) { await sock.sendMessage(jid, { text: "❌ Usage: .voice <text>" }, { quoted: msg }); return true; }
-    try { const r = await textToVoice(t); await sock.sendMessage(jid, { audio: r.buffer, mimetype: "audio/mpeg", ptt: true }, { quoted: msg }); }
+    await sock.sendMessage(jid, { text: "🎙️ Converting text to voice..." }, { quoted: msg });
+    try { 
+      const r = await textToVoice(t); 
+      await sock.sendMessage(jid, { audio: r.buffer, mimetype: r.mimetype, ptt: true }, { quoted: msg }); 
+    }
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
@@ -1373,7 +1418,7 @@ async function handleMessage(username, sock, msg) {
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
-      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.3` }, { quoted: msg });
+      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.4` }, { quoted: msg });
       return;
     }
   }
@@ -1462,6 +1507,16 @@ async function startBot(username, opts = {}) {
       for (const m of ev.messages || []) { if (m.message) handleMessage(clean, sock, m).catch(()=>{}); }
     });
 
+    // ✅ Anti-Delete Fixed (messages.update)
+    sock.ev.on("messages.update", async (updates) => {
+      for (const update of updates) {
+        if (update.update.message === null) {
+          await handleDeletedMessages(clean, sock, [update.key]);
+        }
+      }
+    });
+
+    // Fallback (messages.delete)
     sock.ev.on("messages.delete", async (ev) => {
       const k = Array.isArray(ev) ? ev : ev.keys ? ev.keys : ev.key ? [ev.key] : [];
       await handleDeletedMessages(clean, sock, k);
