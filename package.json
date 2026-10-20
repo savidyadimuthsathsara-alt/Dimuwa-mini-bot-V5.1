@@ -1,7 +1,7 @@
 {
   "name": "dimuwa-mini-bot",
   "version": "5.1.0",
-  "description": "DIMUWA WhatsApp Mini Bot - Ultimate Final Fix",
+  "description": "DIMUWA WhatsApp Mini Bot - V5.1",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -15,6 +15,7 @@
     "axios": "^1.7.9",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "ffmpeg-static": "^5.2.0",
     "form-data": "^4.0.1",
     "node-cache": "^5.1.2",
     "pino": "^9.6.0",
