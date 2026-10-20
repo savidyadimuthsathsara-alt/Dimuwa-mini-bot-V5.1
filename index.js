@@ -105,7 +105,8 @@ const messageCache = new Map();
 const msgRetryCounterCache = new NodeCache();
 const userXP = new Map();
 
-const statusReactList = ["❤️","💚","💙","💛","🤍","🧡","💜","🩷","🔥","😂","😍","😮","👍","🥰","😎","🎉","✨","💯","🙌","🤩","😘","🤗","🌟","💫"];
+const statusReactList = ["😎", "🔥", "🚀", "💥", "⚡", "👑", "💯", "💪", "🏆", "🌟", "✨", "🤩", "💖", "💎", "🤟", "🤘", "🦅", "🦁", "🐉", "🎉", "🎊", "🥳", "🥂", "🍻", "🥇", "🎖️", "💸", "🤑", "🥶", "🦸‍♂️", "🦋", "🌸", "🌺", "🌈", "🌅", "🪄", "🔮", "🧿", "❤️‍🔥", "💫", "⭐", "🎵", "🎶", "😏", "😌", "😉", "🥰", "😍", "🙌", "👏", "✌️", "🤙", "🏄‍♂️", "🏎️", "🚁", "🛸", "🕶️", "🏍️", "🛹", "🏂", "🏋️‍♂️", "🎯", "🎮", "🕹️", "🎰", "🎲", "🎸", "🎧", "🎬", "📸", "🏴‍☠️", "🌴", "🌊", "🌋", "🌌", "🌠", "🎆", "🎇", "🏙️", "🌃", "🏝️", "🏔️", "🐅", "🐆", "🐺", "🦉", "🦈", "🦖", "🪙", "💰", "💳", "🛡️", "⚔️", "🗡️", "🔱", "🛰️", "🛥️", "😼", "👽", "🤖", "👾", "🤠", "🤫", "😜", "🍹", "🍕"];
+
 
 const MAX_MESSAGE_CACHE = 3000;
 const CACHE_TTL = 2 * 60 * 60 * 1000;
@@ -654,7 +655,7 @@ async function processSettingsCode(sock, u, msg, code) {
 
 function menuText(u) {
   const s = getSettings(u);
-  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟰 🤖 👑
+  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.1 🤖 👑
 
 ╭─── « 👨‍💻 𝗖𝗥𝗘𝗔𝗧𝗢𝗥 𝗜𝗡𝗙𝗢 » ───⬣
 │ 👨‍💻 𝗖𝗿𝗲𝗮𝘁𝗼𝗿 : Dimuth Sathsara
@@ -701,7 +702,7 @@ async function sendAlive(sock, username, jid, msg) {
   const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
   const phone = jidNumber(getOwnerJid(sock));
 
-  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟰 🤖 👑
+  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.1 🤖 👑
 
 ╭─── « 🟢 𝗕𝗢𝗧 𝗔𝗟𝗜𝗩𝗘 » ───⬣
 │ 🟢 𝗦𝘁𝗮𝘁𝘂𝘀   : Online ✅
