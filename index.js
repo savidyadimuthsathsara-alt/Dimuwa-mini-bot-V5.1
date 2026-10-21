@@ -493,7 +493,6 @@ async function textToVoice(text) {
   
   await fsp.writeFile(inPath, Buffer.from(r.data));
   try {
-    // FIXED: Using ffmpegPath instead of "ffmpeg"
     await execFileAsync(ffmpegPath, ["-y", "-i", inPath, "-c:a", "libopus", "-b:a", "32k", "-vbr", "on", "-compression_level", "10", "-frame_duration", "60", "-application", "voip", outPath], { timeout: 60000 });
     const outBuffer = await fsp.readFile(outPath);
     await fsp.unlink(inPath).catch(()=>{});
@@ -539,7 +538,6 @@ async function applyBassEffect(buffer) {
   const outPath = path.join(MEDIA_DIR, `${jobId}_out.mp3`);
   await fsp.writeFile(inPath, buffer);
   try {
-    // FIXED: Using ffmpegPath instead of "ffmpeg"
     await execFileAsync(ffmpegPath, ["-y","-i",inPath,"-af","bass=g=15","-b:a","128k",outPath], { timeout: 120000 });
     const out = await fsp.readFile(outPath);
     await fsp.unlink(inPath).catch(()=>{});
@@ -965,23 +963,47 @@ async function downloadSocialMedia(username, url, type) {
   throw new Error("File not found after download");
 }
 
-// FIXED: New API function for YouTube to bypass IP block
+// FIXED: Multi-API Downloader to bypass YouTube/TikTok Bot Protection
 async function downloadFromAPI(url, type) {
   const isAudio = type === 'audio';
-  const apis = [
-    `https://api.siputzx.my.id/api/d/yt${isAudio?'mp3':'mp4'}?url=${encodeURIComponent(url)}`,
-    `https://api.zenkey.my.id/download/yt${isAudio?'mp3':'mp4'}?url=${encodeURIComponent(url)}`
-  ];
+  let apis = [];
+
+  if (/youtube|youtu\.be/i.test(url)) {
+    apis = [
+      `https://api.ryzendesu.vip/api/downloader/yt${isAudio ? 'mp3' : 'mp4'}?url=${encodeURIComponent(url)}`,
+      `https://api.vreden.my.id/api/yt${isAudio ? 'mp3' : 'mp4'}?url=${encodeURIComponent(url)}`,
+      `https://api.siputzx.my.id/api/d/yt${isAudio ? 'mp3' : 'mp4'}?url=${encodeURIComponent(url)}`
+    ];
+  } else if (/tiktok/i.test(url)) {
+    apis = [
+      `https://api.tikwm.com/api/?url=${encodeURIComponent(url)}`
+    ];
+  } else if (/facebook|fb\./i.test(url)) {
+    apis = [
+      `https://api.siputzx.my.id/api/d/facebook?url=${encodeURIComponent(url)}`
+    ];
+  }
 
   for (const api of apis) {
     try {
-      const { data } = await axios.get(api, { timeout: 30000 });
-      const dlUrl = data?.data?.url || data?.data?.dl || data?.download || data?.result?.url || data?.result?.link || data?.url;
+      const { data } = await axios.get(api, { timeout: 20000 });
+      let dlUrl = null;
+
+      if (/tiktok/i.test(url)) {
+        dlUrl = isAudio ? data?.data?.music : data?.data?.play;
+      } else if (/youtube|youtu\.be/i.test(url)) {
+        dlUrl = data?.result?.download || data?.result?.url || data?.data?.url || data?.data?.dl || data?.url || data?.link;
+      } else if (/facebook|fb\./i.test(url)) {
+        dlUrl = data?.data?.url || data?.result?.url || data?.url;
+      }
+
       if (dlUrl) {
-        const res = await axios.get(dlUrl, { responseType: 'arraybuffer', timeout: 120000 });
+        const res = await axios.get(dlUrl, { responseType: 'arraybuffer', timeout: 60000 });
         return Buffer.from(res.data);
       }
-    } catch(e) { /* ignore and try next */ }
+    } catch (e) {
+      // ignore and try next API
+    }
   }
   throw new Error("All APIs failed");
 }
@@ -992,13 +1014,15 @@ async function executeDownload(sock, username, msg, url, type) {
     await sock.sendMessage(jid, { text: `⏳ Downloading ${type.toUpperCase()}...\nPlease wait.` }, { quoted: msg });
     
     let buffer;
-    const isYT = /youtube|youtu\.be/i.test(url);
+    const isSocial = /youtube|youtu\.be|tiktok|facebook|fb\./i.test(url);
     
-    if (isYT) {
+    if (isSocial) {
         try {
+            // Fast API download
             buffer = await downloadFromAPI(url, type === 'audio' ? 'audio' : 'video');
         } catch(e) {
-            logger.warn("API failed for YouTube, falling back to yt-dlp");
+            logger.warn("API failed for " + type + ", falling back to yt-dlp");
+            // Fallback to yt-dlp
             const file = await downloadSocialMedia(username, url, type);
             buffer = await fsp.readFile(file);
             await fsp.unlink(file).catch(()=>{});
