@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <meta name="theme-color" content="#050508">
   <title>DIMUWA MINI BOT V5.2</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/intl-tel-input@25.3.1/build/css/intlTelInput.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
@@ -24,9 +25,25 @@
       left: 0;
       width: 100vw;
       height: 100vh;
-      z-index: -1;
+      z-index: 0;
+      pointer-events: none;
       background: linear-gradient(to bottom, #020204, #0a0a12);
     }
+    header, main, footer { position: relative; z-index: 1; }
+    .auth-screen { background: radial-gradient(circle at 15% 15%, rgba(255,45,85,.24), transparent 42%), radial-gradient(circle at 85% 85%, rgba(95,45,255,.18), transparent 40%), rgba(3,3,5,.72); backdrop-filter: blur(2px); overflow-y:auto; }
+    .auth-card { position:relative; animation: authCardEnter .75s cubic-bezier(.2,.8,.2,1) both, authCardGlow 3s ease-in-out infinite alternate; }
+    .auth-card::before { content:""; position:absolute; inset:-1px; border-radius:inherit; padding:1px; background:linear-gradient(130deg,rgba(255,45,85,.9),rgba(255,255,255,.08),rgba(125,75,255,.8)); -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0); -webkit-mask-composite:xor; mask-composite:exclude; pointer-events:none; }
+    .auth-card img { animation: authLogoFloat 2.8s ease-in-out infinite; }
+    .auth-card h1 { animation: authTextEnter .7s .12s both; }
+    .auth-input { width:100%; padding:13px 14px; border:1px solid rgba(255,255,255,.13); border-radius:12px; background:rgba(0,0,0,.38); color:#fff; outline:none; transition:border-color .2s, box-shadow .2s; }
+    .auth-input:focus { border-color:#ff2d55; box-shadow:0 0 0 3px rgba(255,45,85,.15); }
+    .auth-actions button { transition:transform .2s, filter .2s, box-shadow .2s; }
+    .auth-actions button:hover { transform:translateY(-2px); filter:brightness(1.12); box-shadow:0 8px 24px rgba(255,45,85,.24); }
+    @keyframes authCardEnter { from { opacity:0; transform:translateY(22px) scale(.97); } to { opacity:1; transform:translateY(0) scale(1); } }
+    @keyframes authCardGlow { from { box-shadow:0 20px 65px rgba(0,0,0,.55),0 0 12px rgba(255,45,85,.08); } to { box-shadow:0 24px 80px rgba(0,0,0,.62),0 0 28px rgba(255,45,85,.18); } }
+    @keyframes authLogoFloat { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-5px); } }
+    @keyframes authTextEnter { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+    @media (prefers-reduced-motion: reduce) { .auth-card, .auth-card img, .auth-card h1, .auth-actions button { animation:none; transition:none; } }
 
     button, input { font: inherit; }
     button { cursor: pointer; }
@@ -176,6 +193,12 @@
     #toast.success { border-bottom: 3px solid #00ff88; }
     #toast.error { border-bottom: 3px solid #ff2d55; }
     
+    .iti { width: 100%; display: block; }
+    .iti input { width: 100%; }
+    .iti__country-container { z-index: 20; }
+    .iti__dropdown-content { background: #111118; color: #fff; border: 1px solid rgba(255,255,255,.15); }
+    .iti__country.iti__highlight { background: #262633; }
+    .iti__search-input { color: #fff; background: #08080d; }
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.3); border-top-color: white; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle;}
     @keyframes spin { to { transform: rotate(360deg); } }
     
@@ -186,7 +209,7 @@
 <body>
 <div id="authScreen" class="auth-screen">
   <div class="auth-card">
-    <img src="https://files.catbox.moe/4yay8z.png" alt="DIMUWA BOT">
+    <img src="https://files.catbox.moe/7f5sn4.png" alt="DIMUWA BOT">
     <h1 style="font-size:25px;margin-bottom:8px">DIMUWA MINI BOT</h1>
     <p style="color:#aaa;font-size:13px;line-height:1.6">Log in or create an account to manage your bots.</p>
     <input id="authName" class="auth-input" type="text" autocomplete="name" placeholder="Your name (for new accounts)" />
@@ -199,7 +222,7 @@
 <div id="drawerBackdrop" class="drawer-backdrop" onclick="toggleMenu(false)"></div>
 <aside id="menuDrawer" class="drawer" aria-label="Account menu">
   <div style="display:flex;align-items:center;justify-content:space-between"><h2 style="font-size:18px">Account Menu</h2><button class="menu-btn" onclick="toggleMenu(false)">×</button></div>
-  <div class="profile-row"><img id="profilePhoto" src="https://files.catbox.moe/4yay8z.png" alt="Profile"><div><div id="profileName" style="font-weight:800">Account</div><div id="profileEmail" style="font-size:12px;color:#aaa;overflow-wrap:anywhere">Loading...</div></div></div>
+  <div class="profile-row"><img id="profilePhoto" src="https://files.catbox.moe/7f5sn4.png" alt="Profile"><div><div id="profileName" style="font-weight:800">Account</div><div id="profileEmail" style="font-size:12px;color:#aaa;overflow-wrap:anywhere">Loading...</div></div></div>
   <button class="menu-link" onclick="showMenuSection('profile')">👤 Profile & Login Details <span style="float:right;color:#ff5471">›</span></button>
   <button class="menu-link" onclick="showMenuSection('deploy')">🤖 Bot Deploy Details <span style="float:right;color:#ff5471">›</span></button>
   <button class="menu-link" id="adminMenuLink" style="display:none" onclick="showMenuSection('admin')">🛡️ Admin Panel <span style="float:right;color:#ff5471">›</span></button>
@@ -215,7 +238,7 @@
 <header>
   <div class="container nav">
     <div class="brand">
-      <img src="https://files.catbox.moe/4yay8z.png" alt="DIMUWA">
+      <img src="https://files.catbox.moe/7f5sn4.png" alt="DIMUWA">
       <div>
         <div class="brand-title">DIMUWA MINI BOT V5.2</div>
         <div class="brand-sub">Premium Live Dashboard</div>
@@ -249,8 +272,13 @@
         <input id="username" type="text" placeholder="e.g. MyBot" autocomplete="off">
       </div>
       <div class="input-group">
-        <label>WHATSAPP NUMBER</label>
-        <input id="phone" type="text" placeholder="947XXXXXXXX" autocomplete="off">
+        <label>COUNTRY / COUNTRY CODE</label>
+        <input id="countryPicker" type="tel" aria-label="Search and select country" autocomplete="off">
+        <small style="display:block;color:#aaa;margin-top:7px">Search a country, then select its flag and calling code.</small>
+      </div>
+      <div class="input-group">
+        <label>WHATSAPP NUMBER (WITHOUT COUNTRY CODE)</label>
+        <input id="phone" type="tel" inputmode="numeric" placeholder="e.g. 712345678" autocomplete="tel-national">
       </div>
       <div class="button-row">
         <button class="btn primary" id="pairBtn" onclick="getPairingCode()">🔐 GET PAIRING CODE</button>
@@ -327,6 +355,7 @@
 
 <footer>© 2026 <strong>DIMUWA BOT</strong>. Created by DIMUTH SATHSARA</footer>
 <div id="toast"></div>
+<script src="https://cdn.jsdelivr.net/npm/intl-tel-input@25.3.1/build/js/intlTelInput.min.js"></script>
 
 <!-- Background Animation Script -->
 <script>
@@ -395,13 +424,39 @@
     clearTimeout(window.__t); window.__t = setTimeout(() => box.className = "", 3000);
   }
   async function api(url, opts = {}) {
-    const res = await fetch(url, { ...opts, headers: { "Content-Type": "application/json", ...(opts.headers||{}) }});
+    const res = await fetch(url, { credentials: "same-origin", ...opts, headers: { "Content-Type": "application/json", ...(opts.headers||{}) }});
     const data = await res.json().catch(()=>({}));
     if(!res.ok) throw new Error(data.error || "Request failed");
     return data;
   }
+  let phoneCountryPicker = null;
+  document.addEventListener("DOMContentLoaded", () => {
+    const countryInput = $("countryPicker");
+    if (countryInput && window.intlTelInput) {
+      phoneCountryPicker = window.intlTelInput(countryInput, {
+        initialCountry: "lk",
+        separateDialCode: true,
+        nationalMode: true,
+        allowDropdown: true,
+        countrySearch: true,
+        showFlags: true,
+        autoPlaceholder: "polite"
+      });
+    }
+  });
   function getU() { const v = $("username").value.trim(); if(!v) {toast("Enter username", "error"); return null;} localStorage.setItem("d_u", v); return v; }
-  function getP() { const v = $("phone").value.trim().replace(/\D/g,""); if(!v) {toast("Enter phone", "error"); return null;} return v; }
+  function getP() {
+    const localNumber = $("phone").value.trim().replace(/\D/g,"");
+    if(!localNumber) {toast("Enter phone number", "error"); return null;}
+    if(!phoneCountryPicker) {toast("Country selector is still loading. Refresh and try again.", "error"); return null;}
+    const country = phoneCountryPicker.getSelectedCountryData();
+    if(!country || !country.dialCode) {toast("Select a country first", "error"); return null;}
+    if(localNumber.length < 4 || localNumber.length > 14) {toast("Check the phone number length", "error"); return null;}
+    // Remove the usual domestic trunk prefix (for example, 071... -> 71...) before adding the international calling code.
+    const nationalNumber = localNumber.replace(/^0+/, "");
+    if(!nationalNumber) {toast("Enter a valid phone number", "error"); return null;}
+    return country.dialCode + nationalNumber;
+  }
   
   async function getPairingCode() {
     const u = getU(); const p = getP(); if(!u || !p) return;
@@ -520,7 +575,7 @@
   async function checkAccountLogin() {
     try {
       const d = await api("/auth/status");
-      if (!d.configured) { $("authError").textContent = "Site owner must configure SESSION_SECRET and ADMIN_PASSWORD in Railway Variables."; return; }
+      if (!d.configured) { $("authError").textContent = "Login is not configured yet. The site owner must add SESSION_SECRET and ADMIN_PASSWORD in the hosting environment variables."; $("authScreen").style.display="flex"; return; }
       if (!d.user) { $("authScreen").style.display="flex";  return; }
       signedInUser=d.user; $("authScreen").style.display="none";
       $("profileName").textContent=d.user.name || "Account"; $("profileEmail").textContent=d.user.email;
@@ -532,7 +587,7 @@
   async function passwordLogin() {
     const email=$("authEmail").value.trim(); const password=$("authPassword").value;
     try { const d=await api("/auth/login",{method:"POST",body:JSON.stringify({email,password})}); signedInUser=d.user; await checkAccountLogin(); toast("Login successful","success"); }
-    catch(e) { $("authError").textContent=e.message; }
+    catch(e) { $("authError").textContent=e.message || "Login failed. Check your email and password, then try again."; }
   }
   async function passwordRegister() {
     const email=$("authEmail").value.trim(); const password=$("authPassword").value; const name=$("authName").value.trim();
@@ -556,7 +611,7 @@
     try {
       const d=await api("/api/admin/overview");
       const metrics=`<div class="metric-grid"><div class="metric"><strong>${d.accounts.length}</strong><span>Registered accounts</span></div><div class="metric"><strong>${d.totalBots}</strong><span>Total bots</span></div><div class="metric"><strong>${d.onlineBots}</strong><span>Online bots</span></div><div class="metric"><strong>${d.offlineBots}</strong><span>Offline bots</span></div></div>`;
-      const accounts=d.accounts.length?d.accounts.map(a=>`<div class="account-card"><h4>👤 ${escapeHTML(a.name||a.email)}</h4><p>${escapeHTML(a.email)}<br>Bot count: ${a.bots} · Online: ${a.online} · Offline: ${a.offline}<br>Account: <b style="color:${a.blocked?'#ff6478':'#00e894'}">${a.blocked?'BLOCKED':'ACTIVE'}</b></p></div>`).join(''):'<div class="empty-state">No registered accounts yet.</div>';
+      const accounts=d.accounts.length?d.accounts.map(a=>`<div class="account-card"><h4>👤 ${escapeHTML(a.name||a.email)}</h4><p>${escapeHTML(a.email)}<br>Bot count: ${a.bots} · Online: ${a.online} · Offline: ${a.offline}<br>Account: <b style="color:${a.blocked?'#ff6478':'#00e894'}">${a.blocked?'BLOCKED':'ACTIVE'}</b></p>${a.email.toLowerCase()!=="dimuthsathsara13@gmail.com"?`<button class="btn ${a.blocked?'success':'danger'}" onclick="adminSetBlocked('${escapeHTML(a.email)}',${!a.blocked})">${a.blocked?'✓ UNBLOCK ACCOUNT':'⛔ BLOCK ACCOUNT'}</button>`:''}</div>`).join(''):'<div class="empty-state">No registered accounts yet.</div>';
       const bots=d.bots.length?d.bots.map(b=>`<div class="account-card"><h4>🤖 ${escapeHTML(b.username)} <span style="color:${b.online?'#00e894':'#ff6478'}">· ${b.online?'ONLINE':'OFFLINE'}</span></h4><p>Owner: ${escapeHTML(b.email)}<br>Created: ${b.createdAt?escapeHTML(new Date(b.createdAt).toLocaleString()):'-'}<br>Expires: ${b.expiresAt?escapeHTML(new Date(b.expiresAt).toLocaleString()):'-'}${b.expired?' · EXPIRED':''}</p></div>`).join(''):'<div class="empty-state">No bots registered yet.</div>';
       box.innerHTML=`${metrics}<div class="premium-card"><h3>Registered Accounts</h3>${accounts}</div><div class="premium-card"><h3>All Bot Sessions</h3>${bots}</div>`;
       const actions=$("adminAccountActions"); actions.replaceChildren();
