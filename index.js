@@ -45,7 +45,7 @@ const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const STATS_FILE = path.join(DATA_DIR, "stats.json");
 
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
-const LOGO_URL = "https://files.catbox.moe/4yay8z.png";
+const LOGO_URL = "https://files.catbox.moe/7f5sn4.png";
 const MENU_AUDIO_URL = "https://files.catbox.moe/vsl1wg.mp3";
 const CREATOR_NAME = "Dimuth Sathsara";
 
@@ -62,7 +62,7 @@ for (const dir of [DATA_DIR, SESSION_DIR, MEDIA_DIR, TOOLS_DIR]) {
 
 // ==========================================
 // PASSWORD LOGIN + ACCOUNT/BOT ACCESS CONTROL
-// Set SESSION_SECRET and ADMIN_PASSWORD in Railway Variables.
+// Set SESSION_SECRET and ADMIN_PASSWORD in your hosting environment variables.
 // ==========================================
 const ADMIN_EMAIL = "dimuthsathsara13@gmail.com";
 const ACCOUNTS_FILE = path.join(DATA_DIR, "accounts.json");
@@ -71,12 +71,15 @@ const accountDB = readJson(ACCOUNTS_FILE, {});
 const botOwnersDB = readJson(BOT_OWNERS_FILE, {});
 const FileStore = FileStoreFactory(session);
 const authConfigured = !!(process.env.SESSION_SECRET && process.env.ADMIN_PASSWORD);
+// Trust the HTTPS reverse proxy used by hosted platforms so secure session cookies persist.
+app.set("trust proxy", 1);
+fs.mkdirSync(path.join(DATA_DIR, "web-sessions"), { recursive: true });
 app.use(session({
   name: "dimuwa.sid",
   store: new FileStore({ path: path.join(DATA_DIR, "web-sessions"), retries: 0, ttl: 60 * 60 * 24 * 14 }),
   secret: process.env.SESSION_SECRET || "CONFIGURE_SESSION_SECRET_IN_RAILWAY",
   resave: false, saveUninitialized: false,
-  cookie: { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", maxAge: 14 * 24 * 60 * 60 * 1000 }
+  cookie: { httpOnly: true, secure: process.env.NODE_ENV === "production" ? "auto" : false, sameSite: "lax", maxAge: 14 * 24 * 60 * 60 * 1000 }
 }));
 app.use(passport.initialize());
 app.use(passport.session());
@@ -131,7 +134,7 @@ app.get("/auth/status", (req, res) => {
 });
 app.post("/auth/register", async (req, res, next) => {
   try {
-    if (!authConfigured) return res.status(503).json({ ok:false, error:"Set SESSION_SECRET and ADMIN_PASSWORD in Railway Variables first." });
+    if (!authConfigured) return res.status(503).json({ ok:false, error:"Set SESSION_SECRET and ADMIN_PASSWORD in your hosting environment variables first." });
     const email = String(req.body.email || "").trim().toLowerCase();
     const password = String(req.body.password || "");
     const name = String(req.body.name || email.split("@")[0]).trim().slice(0,80);
@@ -148,7 +151,7 @@ app.post("/auth/register", async (req, res, next) => {
   } catch(e) { next(e); }
 });
 app.post("/auth/login", (req, res, next) => {
-  if (!authConfigured) return res.status(503).json({ok:false,error:"Set SESSION_SECRET and ADMIN_PASSWORD in Railway Variables first."});
+  if (!authConfigured) return res.status(503).json({ok:false,error:"Set SESSION_SECRET and ADMIN_PASSWORD in your hosting environment variables first."});
   const email = String(req.body.email || "").trim().toLowerCase();
   const password = String(req.body.password || "");
   if (email === ADMIN_EMAIL) {
@@ -343,17 +346,12 @@ async function handleStatus(username, sock, msg) {
     }
 
     try {
-      // FIXED: Removed statusJidList and formatted key correctly
+      // Status reactions need the original status message key and statusJidList.
+      // Keep the reaction scoped to the person who posted this status.
       await sock.sendMessage("status@broadcast", {
-        react: { 
-          text: emoji, 
-          key: {
-            remoteJid: "status@broadcast",
-            fromMe: false,
-            id: msg.key.id,
-            participant: participant
-          }
-        }
+        react: { text: emoji, key: msg.key }
+      }, {
+        statusJidList: [participant]
       });
       logger.info(`[STATUS REACT] ${emoji} → ${jidNumber(participant)}`);
     } catch (e) {
