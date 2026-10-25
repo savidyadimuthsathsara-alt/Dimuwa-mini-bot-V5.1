@@ -62,7 +62,10 @@
     .auth-screen { position:fixed; inset:0; z-index:9000; display:flex; align-items:center; justify-content:center; padding:22px; background:radial-gradient(circle at top,#241018,#030305 65%); }
     .auth-card { width:min(420px,100%); text-align:center; padding:34px 26px; border:1px solid rgba(255,255,255,.12); border-radius:24px; background:rgba(20,20,25,.92); box-shadow:0 25px 80px #000; }
     .auth-card img { width:68px;height:68px;border-radius:18px; margin-bottom:16px; }
-    .google-btn { display:flex; justify-content:center; align-items:center; gap:12px; width:100%; margin-top:22px; padding:14px; border:0; border-radius:12px; background:#fff; color:#222; font-weight:800; }
+    .google-btn { display:flex; justify-content:center; align-items:center; gap:12px; width:100%; margin-top:12px; padding:14px; border:0; border-radius:12px; background:linear-gradient(135deg,#ff2d55,#a30022); color:#fff; font-weight:800; }
+    .auth-input { margin-top:10px; }
+    .auth-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px; }
+    .auth-actions button { margin:0; }
     .auth-note { margin-top:16px; color:#aaa; font-size:12px; line-height:1.6; }
     .drawer-backdrop { position:fixed; inset:0; z-index:5000; background:rgba(0,0,0,.65); display:none; }
     .drawer { position:fixed; z-index:5001; top:0; right:0; height:100vh; width:min(340px,88vw); padding:24px; background:#101015; border-left:1px solid rgba(255,255,255,.12); transform:translateX(105%); transition:transform .25s; overflow:auto; }
@@ -164,22 +167,25 @@
   <div class="auth-card">
     <img src="https://files.catbox.moe/4yay8z.png" alt="DIMUWA BOT">
     <h1 style="font-size:25px;margin-bottom:8px">DIMUWA MINI BOT</h1>
-    <p style="color:#aaa;font-size:13px;line-height:1.6">Sign in securely with your Google account to manage your bots.</p>
-    <button class="google-btn" onclick="window.location.href='/auth/google'"><span style="font-size:20px;font-weight:900">G</span> Continue with Google</button>
-    <p id="authError" class="auth-note">Your Google account will be verified securely.</p>
+    <p style="color:#aaa;font-size:13px;line-height:1.6">Log in or create an account to manage your bots.</p>
+    <input id="authName" class="auth-input" type="text" autocomplete="name" placeholder="Your name (for new accounts)" />
+    <input id="authEmail" class="auth-input" type="email" autocomplete="username" placeholder="Email address" />
+    <input id="authPassword" class="auth-input" type="password" autocomplete="current-password" placeholder="Password (minimum 8 characters)" />
+    <div class="auth-actions"><button class="google-btn" onclick="passwordLogin()">LOGIN</button><button class="google-btn" onclick="passwordRegister()">CREATE ACCOUNT</button></div>
+    <p id="authError" class="auth-note">Use your account email and password. The admin account is reserved for the site owner.</p>
   </div>
 </div>
 <div id="drawerBackdrop" class="drawer-backdrop" onclick="toggleMenu(false)"></div>
 <aside id="menuDrawer" class="drawer" aria-label="Account menu">
   <div style="display:flex;align-items:center;justify-content:space-between"><h2 style="font-size:18px">Account Menu</h2><button class="menu-btn" onclick="toggleMenu(false)">×</button></div>
-  <div class="profile-row"><img id="profilePhoto" src="https://files.catbox.moe/4yay8z.png" alt="Profile"><div><div id="profileName" style="font-weight:800">Google Account</div><div id="profileEmail" style="font-size:12px;color:#aaa;overflow-wrap:anywhere">Loading...</div></div></div>
+  <div class="profile-row"><img id="profilePhoto" src="https://files.catbox.moe/4yay8z.png" alt="Profile"><div><div id="profileName" style="font-weight:800">Account</div><div id="profileEmail" style="font-size:12px;color:#aaa;overflow-wrap:anywhere">Loading...</div></div></div>
   <button class="menu-link" onclick="showMenuSection('profile')">👤 Profile & Login Details</button>
   <button class="menu-link" onclick="showMenuSection('deploy')">🤖 Bot Deploy Details</button>
   <button class="menu-link" id="adminMenuLink" style="display:none" onclick="showMenuSection('admin')">🛡️ Admin Panel</button>
-  <div id="profileSection" class="admin-panel"><h3>Profile</h3><p class="auth-note">Signed in using verified Google identity.</p><div id="profileDetails" class="auth-note"></div></div>
+  <div id="profileSection" class="admin-panel"><h3>Profile</h3><p class="auth-note">Signed in with your DIMUWA account.</p><div id="profileDetails" class="auth-note"></div></div>
   <div id="deploySection" class="admin-panel"><h3>Bot Deploy Details</h3><div id="deployDetails" class="auth-note">Loading...</div><button class="btn" style="margin-top:12px" onclick="loadAccountDetails()">Refresh details</button></div>
   <div id="adminSection" class="admin-panel"><h3>Admin Panel</h3><div id="adminOverview" class="auth-note">Loading...</div><div id="adminAccountActions"></div><button class="btn" style="margin:12px 0" onclick="loadAdminOverview()">Refresh admin data</button></div>
-  <button class="menu-link" style="margin-top:24px;color:#ff6478" onclick="googleLogout()">↪ Logout Google Account</button>
+  <button class="menu-link" style="margin-top:24px;color:#ff6478" onclick="accountLogout()">↪ Logout Account</button>
 </aside>
 
 <!-- Live Animated Background Canvas -->
@@ -480,21 +486,31 @@
     ["profile","deploy","admin"].forEach(k => { const el=$(k+"Section"); if(el) el.style.display = k===which ? "block" : "none"; });
     if(which==="deploy") loadAccountDetails();
     if(which==="admin") loadAdminOverview();
-    if(which==="profile" && signedInUser) $("profileDetails").textContent = `Name: ${signedInUser.name || "-"}\nGoogle account: ${signedInUser.email}\nAccount created: ${signedInUser.createdAt ? new Date(signedInUser.createdAt).toLocaleString() : "-"}\nLast login: ${signedInUser.lastLoginAt ? new Date(signedInUser.lastLoginAt).toLocaleString() : "-"}`;
+    if(which==="profile" && signedInUser) $("profileDetails").textContent = `Name: ${signedInUser.name || "-"}\nAccount email: ${signedInUser.email}\nAccount created: ${signedInUser.createdAt ? new Date(signedInUser.createdAt).toLocaleString() : "-"}\nLast login: ${signedInUser.lastLoginAt ? new Date(signedInUser.lastLoginAt).toLocaleString() : "-"}`;
   }
-  async function checkGoogleLogin() {
+  async function checkAccountLogin() {
     try {
       const d = await api("/auth/status");
-      if (!d.configured) { $("authError").textContent = "Admin setup required: configure Google OAuth variables in Railway."; return; }
-      if (!d.user) { $("authScreen").style.display="flex"; if(new URLSearchParams(location.search).has("login")) $("authError").textContent="Google sign-in failed. Please choose a verified Google account."; return; }
+      if (!d.configured) { $("authError").textContent = "Site owner must configure SESSION_SECRET and ADMIN_PASSWORD in Railway Variables."; return; }
+      if (!d.user) { $("authScreen").style.display="flex";  return; }
       signedInUser=d.user; $("authScreen").style.display="none";
-      $("profileName").textContent=d.user.name || "Google Account"; $("profileEmail").textContent=d.user.email;
+      $("profileName").textContent=d.user.name || "Account"; $("profileEmail").textContent=d.user.email;
       if(d.user.photo) $("profilePhoto").src=d.user.photo;
       if(d.user.isAdmin) $("adminMenuLink").style.display="block";
       if(d.user.isAdmin) loadAdminOverview();
     } catch(e) { $("authScreen").style.display="flex"; $("authError").textContent=e.message; }
   }
-  async function googleLogout() { try { await api("/auth/logout", {method:"POST"}); location.href="/"; } catch(e) { toast(e.message,"error"); } }
+  async function passwordLogin() {
+    const email=$("authEmail").value.trim(); const password=$("authPassword").value;
+    try { const d=await api("/auth/login",{method:"POST",body:JSON.stringify({email,password})}); signedInUser=d.user; await checkAccountLogin(); toast("Login successful","success"); }
+    catch(e) { $("authError").textContent=e.message; }
+  }
+  async function passwordRegister() {
+    const email=$("authEmail").value.trim(); const password=$("authPassword").value; const name=$("authName").value.trim();
+    try { const d=await api("/auth/register",{method:"POST",body:JSON.stringify({email,password,name})}); signedInUser=d.user; await checkAccountLogin(); toast("Account created","success"); }
+    catch(e) { $("authError").textContent=e.message; }
+  }
+  async function accountLogout() { try { await api("/auth/logout", {method:"POST"}); location.href="/"; } catch(e) { toast(e.message,"error"); } }
   async function loadAccountDetails() {
     try {
       const d=await api("/api/account");
@@ -523,7 +539,7 @@
     try { await api(`/api/admin/accounts/${encodeURIComponent(email)}/${block?"block":"unblock"}`,{method:"POST"}); toast("Account updated","success"); loadAdminOverview(); }
     catch(e) { toast(e.message,"error"); }
   }
-  document.addEventListener("DOMContentLoaded", checkGoogleLogin);
+  document.addEventListener("DOMContentLoaded", checkAccountLogin);
 </script>
 </body>
 </html>
