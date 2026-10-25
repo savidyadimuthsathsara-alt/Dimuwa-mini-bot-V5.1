@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <meta name="theme-color" content="#050508">
-  <title>DIMUWA MINI BOT V5.4.1</title>
+  <title>DIMUWA MINI BOT V5.2</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
@@ -58,6 +58,22 @@
     .brand-title { font-size: 19px; font-weight: 900; letter-spacing: 1px; color: #fff; }
     .brand-sub { font-size: 11px; color: #ff2d55; margin-top: 2px; text-transform: uppercase; letter-spacing: 1px; font-weight: bold;}
     
+    .menu-btn { border:1px solid rgba(255,255,255,.15); background:rgba(255,255,255,.06); color:#fff; padding:10px 13px; border-radius:12px; font-size:20px; }
+    .auth-screen { position:fixed; inset:0; z-index:9000; display:flex; align-items:center; justify-content:center; padding:22px; background:radial-gradient(circle at top,#241018,#030305 65%); }
+    .auth-card { width:min(420px,100%); text-align:center; padding:34px 26px; border:1px solid rgba(255,255,255,.12); border-radius:24px; background:rgba(20,20,25,.92); box-shadow:0 25px 80px #000; }
+    .auth-card img { width:68px;height:68px;border-radius:18px; margin-bottom:16px; }
+    .google-btn { display:flex; justify-content:center; align-items:center; gap:12px; width:100%; margin-top:22px; padding:14px; border:0; border-radius:12px; background:#fff; color:#222; font-weight:800; }
+    .auth-note { margin-top:16px; color:#aaa; font-size:12px; line-height:1.6; }
+    .drawer-backdrop { position:fixed; inset:0; z-index:5000; background:rgba(0,0,0,.65); display:none; }
+    .drawer { position:fixed; z-index:5001; top:0; right:0; height:100vh; width:min(340px,88vw); padding:24px; background:#101015; border-left:1px solid rgba(255,255,255,.12); transform:translateX(105%); transition:transform .25s; overflow:auto; }
+    .drawer.open { transform:translateX(0); }
+    .drawer-backdrop.open { display:block; }
+    .profile-row { display:flex; align-items:center; gap:12px; margin:12px 0 22px; }
+    .profile-row img { width:48px;height:48px;border-radius:50%;object-fit:cover;background:#333; }
+    .menu-link { width:100%; text-align:left; margin:5px 0; padding:13px 14px; border:1px solid rgba(255,255,255,.08); border-radius:12px; background:rgba(255,255,255,.04); color:#fff; }
+    .menu-link:hover { border-color:#ff2d55; }
+    .admin-panel { display:none; margin-top:20px; }
+    .admin-panel pre { white-space:pre-wrap; overflow-wrap:anywhere; color:#ddd; font-size:12px; }
     .online-badge { display: flex; align-items: center; gap: 7px; padding: 8px 14px; border-radius: 999px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); font-size: 11px; font-weight: 700; color: #ddd; backdrop-filter: blur(5px);}
     .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
     .dot.online { background: #00ff88; box-shadow: 0 0 12px #00ff88; animation: blink 1.5s infinite; }
@@ -144,6 +160,27 @@
   </style>
 </head>
 <body>
+<div id="authScreen" class="auth-screen">
+  <div class="auth-card">
+    <img src="https://files.catbox.moe/4yay8z.png" alt="DIMUWA BOT">
+    <h1 style="font-size:25px;margin-bottom:8px">DIMUWA MINI BOT</h1>
+    <p style="color:#aaa;font-size:13px;line-height:1.6">Sign in securely with your Google account to manage your bots.</p>
+    <button class="google-btn" onclick="window.location.href='/auth/google'"><span style="font-size:20px;font-weight:900">G</span> Continue with Google</button>
+    <p id="authError" class="auth-note">Your Google account will be verified securely.</p>
+  </div>
+</div>
+<div id="drawerBackdrop" class="drawer-backdrop" onclick="toggleMenu(false)"></div>
+<aside id="menuDrawer" class="drawer" aria-label="Account menu">
+  <div style="display:flex;align-items:center;justify-content:space-between"><h2 style="font-size:18px">Account Menu</h2><button class="menu-btn" onclick="toggleMenu(false)">×</button></div>
+  <div class="profile-row"><img id="profilePhoto" src="https://files.catbox.moe/4yay8z.png" alt="Profile"><div><div id="profileName" style="font-weight:800">Google Account</div><div id="profileEmail" style="font-size:12px;color:#aaa;overflow-wrap:anywhere">Loading...</div></div></div>
+  <button class="menu-link" onclick="showMenuSection('profile')">👤 Profile & Login Details</button>
+  <button class="menu-link" onclick="showMenuSection('deploy')">🤖 Bot Deploy Details</button>
+  <button class="menu-link" id="adminMenuLink" style="display:none" onclick="showMenuSection('admin')">🛡️ Admin Panel</button>
+  <div id="profileSection" class="admin-panel"><h3>Profile</h3><p class="auth-note">Signed in using verified Google identity.</p><div id="profileDetails" class="auth-note"></div></div>
+  <div id="deploySection" class="admin-panel"><h3>Bot Deploy Details</h3><div id="deployDetails" class="auth-note">Loading...</div><button class="btn" style="margin-top:12px" onclick="loadAccountDetails()">Refresh details</button></div>
+  <div id="adminSection" class="admin-panel"><h3>Admin Panel</h3><div id="adminOverview" class="auth-note">Loading...</div><div id="adminAccountActions"></div><button class="btn" style="margin:12px 0" onclick="loadAdminOverview()">Refresh admin data</button></div>
+  <button class="menu-link" style="margin-top:24px;color:#ff6478" onclick="googleLogout()">↪ Logout Google Account</button>
+</aside>
 
 <!-- Live Animated Background Canvas -->
 <canvas id="bg-canvas"></canvas>
@@ -153,13 +190,13 @@
     <div class="brand">
       <img src="https://files.catbox.moe/4yay8z.png" alt="DIMUWA">
       <div>
-        <div class="brand-title">DIMUWA MINI BOT V5.4.1</div>
+        <div class="brand-title">DIMUWA MINI BOT V5.2</div>
         <div class="brand-sub">Premium Live Dashboard</div>
       </div>
     </div>
-    <div class="online-badge">
-      <span id="statusDot" class="dot"></span>
-      <span id="statusText">Checking...</span>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="online-badge"><span id="statusDot" class="dot"></span><span id="statusText">Checking...</span></div>
+      <button class="menu-btn" aria-label="Open menu" onclick="toggleMenu(true)">☰</button>
     </div>
   </div>
 </header>
@@ -436,6 +473,57 @@
   document.addEventListener("DOMContentLoaded", () => {
     const s = localStorage.getItem("d_u"); if(s) { $("username").value = s; loadAll(); }
   });
+
+  let signedInUser = null;
+  function toggleMenu(open) { $("menuDrawer").classList.toggle("open", !!open); $("drawerBackdrop").classList.toggle("open", !!open); }
+  function showMenuSection(which) {
+    ["profile","deploy","admin"].forEach(k => { const el=$(k+"Section"); if(el) el.style.display = k===which ? "block" : "none"; });
+    if(which==="deploy") loadAccountDetails();
+    if(which==="admin") loadAdminOverview();
+    if(which==="profile" && signedInUser) $("profileDetails").textContent = `Name: ${signedInUser.name || "-"}\nGoogle account: ${signedInUser.email}\nAccount created: ${signedInUser.createdAt ? new Date(signedInUser.createdAt).toLocaleString() : "-"}\nLast login: ${signedInUser.lastLoginAt ? new Date(signedInUser.lastLoginAt).toLocaleString() : "-"}`;
+  }
+  async function checkGoogleLogin() {
+    try {
+      const d = await api("/auth/status");
+      if (!d.configured) { $("authError").textContent = "Admin setup required: configure Google OAuth variables in Railway."; return; }
+      if (!d.user) { $("authScreen").style.display="flex"; if(new URLSearchParams(location.search).has("login")) $("authError").textContent="Google sign-in failed. Please choose a verified Google account."; return; }
+      signedInUser=d.user; $("authScreen").style.display="none";
+      $("profileName").textContent=d.user.name || "Google Account"; $("profileEmail").textContent=d.user.email;
+      if(d.user.photo) $("profilePhoto").src=d.user.photo;
+      if(d.user.isAdmin) $("adminMenuLink").style.display="block";
+      if(d.user.isAdmin) loadAdminOverview();
+    } catch(e) { $("authScreen").style.display="flex"; $("authError").textContent=e.message; }
+  }
+  async function googleLogout() { try { await api("/auth/logout", {method:"POST"}); location.href="/"; } catch(e) { toast(e.message,"error"); } }
+  async function loadAccountDetails() {
+    try {
+      const d=await api("/api/account");
+      const lines=[`Account: ${d.user.email}`,`Monthly bot usage: ${d.monthlyCreated}/${d.monthlyLimit}`,`Bots owned: ${d.bots.length}`,`Online: ${d.bots.filter(b=>b.online).length}`,`Offline: ${d.bots.filter(b=>!b.online).length}`,...d.bots.map(b=>`${b.username}: ${b.online?"ONLINE":"OFFLINE"} · ${b.expired?"EXPIRED":Math.max(0,Math.ceil((b.expiresAt-Date.now())/86400000))+" days left"} · expires ${new Date(b.expiresAt).toLocaleString()}`)];
+      $("deployDetails").textContent=lines.join("\n");
+    } catch(e) { $("deployDetails").textContent=e.message; }
+  }
+  async function loadAdminOverview() {
+    if(!signedInUser || !signedInUser.isAdmin) return;
+    try {
+      const d=await api("/api/admin/overview");
+      let lines=[`Accounts: ${d.accounts.length}`,`Total bots: ${d.totalBots}`,`Online: ${d.onlineBots}`,`Offline: ${d.offlineBots}`,"", "ACCOUNTS:"];
+      d.accounts.forEach(a=>{ lines.push(`${a.email} | ${a.name} | bots ${a.bots} | online ${a.online} | offline ${a.offline} | ${a.blocked?"BLOCKED":"ACTIVE"}`); });
+      lines.push("", "ALL BOTS:");
+      d.bots.forEach(b=>{ lines.push(`${b.username} | ${b.email} | ${b.online?"ONLINE":"OFFLINE"} | created ${new Date(b.createdAt).toLocaleString()} | expires ${new Date(b.expiresAt).toLocaleString()}${b.expired?" | EXPIRED":""}`); });
+      $("adminOverview").textContent=lines.join("\n");
+      // Render safe action buttons for each account (never allow blocking the admin).
+      const box=$("adminAccountActions"); box.replaceChildren();
+      d.accounts.filter(a=>a.email!=="dimuthsathsara13@gmail.com").forEach(a=>{
+        const b=document.createElement("button"); b.className="menu-link"; b.textContent=(a.blocked?"Unblock ":"Block ")+a.email;
+        b.onclick=()=>adminSetBlocked(a.email,!a.blocked); box.appendChild(b);
+      });
+    } catch(e) { $("adminOverview").textContent=e.message; }
+  }
+  async function adminSetBlocked(email, block) {
+    try { await api(`/api/admin/accounts/${encodeURIComponent(email)}/${block?"block":"unblock"}`,{method:"POST"}); toast("Account updated","success"); loadAdminOverview(); }
+    catch(e) { toast(e.message,"error"); }
+  }
+  document.addEventListener("DOMContentLoaded", checkGoogleLogin);
 </script>
 </body>
 </html>
