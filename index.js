@@ -4,7 +4,6 @@ const express = require("express");
 const session = require("express-session");
 const FileStoreFactory = require("session-file-store");
 const passport = require("passport");
-const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const cors = require("cors");
 const pino = require("pino");
 const QRCode = require("qrcode");
@@ -62,9 +61,8 @@ for (const dir of [DATA_DIR, SESSION_DIR, MEDIA_DIR, TOOLS_DIR]) {
 }
 
 // ==========================================
-// GOOGLE OAUTH + ACCOUNT/BOT ACCESS CONTROL
-// Configure GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL,
-// SESSION_SECRET and DATA_DIR in Railway Variables before enabling login.
+// PASSWORD LOGIN + ACCOUNT/BOT ACCESS CONTROL
+// Set SESSION_SECRET and ADMIN_PASSWORD in Railway Variables.
 // ==========================================
 const ADMIN_EMAIL = "dimuthsathsara13@gmail.com";
 const ACCOUNTS_FILE = path.join(DATA_DIR, "accounts.json");
@@ -72,7 +70,7 @@ const BOT_OWNERS_FILE = path.join(DATA_DIR, "bot-owners.json");
 const accountDB = readJson(ACCOUNTS_FILE, {});
 const botOwnersDB = readJson(BOT_OWNERS_FILE, {});
 const FileStore = FileStoreFactory(session);
-const oauthConfigured = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.SESSION_SECRET);
+const authConfigured = !!(process.env.SESSION_SECRET && process.env.ADMIN_PASSWORD);
 app.use(session({
   name: "dimuwa.sid",
   store: new FileStore({ path: path.join(DATA_DIR, "web-sessions"), retries: 0, ttl: 60 * 60 * 24 * 14 }),
@@ -84,26 +82,24 @@ app.use(passport.initialize());
 app.use(passport.session());
 passport.serializeUser((user, done) => done(null, user));
 passport.deserializeUser((user, done) => done(null, user));
-if (oauthConfigured) {
-  passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: process.env.GOOGLE_CALLBACK_URL || "https://" + (process.env.RAILWAY_PUBLIC_DOMAIN || "localhost") + "/auth/google/callback"
-  }, (accessToken, refreshToken, profile, done) => {
-    const email = String(profile.emails?.find(e => e.verified !== false)?.value || "").toLowerCase();
-    const verified = profile.emails?.some(e => e.verified === true);
-    if (!email || !verified) return done(null, false, { message: "A verified Google email is required." });
-    const old = accountDB[email] || {};
-    if (old.blocked) return done(null, false, { message: "This account is blocked. Contact the administrator." });
-    accountDB[email] = { email, name: profile.displayName || email.split("@")[0], photo: profile.photos?.[0]?.value || "", createdAt: old.createdAt || Date.now(), lastLoginAt: Date.now(), blocked: false };
-    writeJson(ACCOUNTS_FILE, accountDB);
-    return done(null, { email, name: accountDB[email].name, photo: accountDB[email].photo, isAdmin: email === ADMIN_EMAIL });
-  }));
+function hashPassword(password, salt) {
+  return crypto.scryptSync(String(password), salt, 64).toString("hex");
+}
+function passwordMatches(password, account) {
+  if (!account?.passwordHash || !account?.passwordSalt) return false;
+  const actual = Buffer.from(hashPassword(password, account.passwordSalt), "hex");
+  const expected = Buffer.from(account.passwordHash, "hex");
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+function safeUser(email) {
+  const account = accountDB[email] || {};
+  return { email, name: account.name || email.split("@")[0], photo: account.photo || "", createdAt: account.createdAt || null, lastLoginAt: account.lastLoginAt || null, isAdmin: email === ADMIN_EMAIL };
 }
 function requireAuth(req, res, next) {
-  if (!req.isAuthenticated?.() || !req.user?.email) return res.status(401).json({ ok:false, error:"Please sign in with Google first.", loginRequired:true });
-  const account = accountDB[String(req.user.email).toLowerCase()];
-  if (!account || account.blocked) return res.status(403).json({ ok:false, error:"Account access is blocked." });
+  if (!req.isAuthenticated?.() || !req.user?.email) return res.status(401).json({ ok:false, error:"Please log in first.", loginRequired:true });
+  const email = String(req.user.email).toLowerCase();
+  const account = accountDB[email];
+  if (!account || account.blocked) return res.status(403).json({ ok:false, error:"Account access is blocked or unavailable." });
   next();
 }
 function requireAdmin(req, res, next) {
@@ -128,16 +124,51 @@ function claimBotForUser(username, req) {
   return clean;
 }
 app.get("/auth/status", (req, res) => {
-  const savedAccount = req.user ? accountDB[String(req.user.email).toLowerCase()] : null;
-  const user = req.user ? { email:req.user.email, name:req.user.name, photo:req.user.photo, createdAt:savedAccount?.createdAt || null, lastLoginAt:savedAccount?.lastLoginAt || null, isAdmin:String(req.user.email).toLowerCase() === ADMIN_EMAIL } : null;
-  res.json({ ok:true, configured:oauthConfigured, user });
+  const email = req.user?.email ? String(req.user.email).toLowerCase() : null;
+  const savedAccount = email ? accountDB[email] : null;
+  const user = email && savedAccount ? safeUser(email) : null;
+  res.json({ ok:true, configured:authConfigured, user });
 });
-app.get("/auth/google", (req, res, next) => {
-  if (!oauthConfigured) return res.status(503).send("Google OAuth is not configured. Add GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL and SESSION_SECRET in Railway Variables.");
-  passport.authenticate("google", { scope:["profile", "email"], prompt:"select_account" })(req,res,next);
+app.post("/auth/register", async (req, res, next) => {
+  try {
+    if (!authConfigured) return res.status(503).json({ ok:false, error:"Set SESSION_SECRET and ADMIN_PASSWORD in Railway Variables first." });
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    const name = String(req.body.name || email.split("@")[0]).trim().slice(0,80);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ok:false,error:"Enter a valid email address."});
+    if (email === ADMIN_EMAIL) return res.status(403).json({ok:false,error:"The administrator account is reserved. Use the administrator password set by the site owner."});
+    if (password.length < 8 || password.length > 200) return res.status(400).json({ok:false,error:"Password must be at least 8 characters."});
+    if (accountDB[email]?.passwordHash) return res.status(409).json({ok:false,error:"An account with this email already exists. Please log in."});
+    if (accountDB[email]?.blocked) return res.status(403).json({ok:false,error:"This account is blocked. Contact the administrator."});
+    const oldAccount = accountDB[email] || {};
+    const salt = crypto.randomBytes(16).toString("hex");
+    accountDB[email] = { ...oldAccount, email, name: name || oldAccount.name || email.split("@")[0], photo:"", passwordSalt:salt, passwordHash:hashPassword(password,salt), createdAt:oldAccount.createdAt || Date.now(), lastLoginAt:Date.now(), blocked:false };
+    writeJson(ACCOUNTS_FILE, accountDB);
+    req.login(safeUser(email), err => { if (err) return next(err); res.json({ok:true,user:safeUser(email)}); });
+  } catch(e) { next(e); }
 });
-app.get("/auth/google/callback", (req,res,next) => passport.authenticate("google", { failureRedirect:"/?login=failed" })(req,res,next), (req,res) => res.redirect("/"));
-app.post("/auth/logout", (req,res) => req.logout(err => { if (err) return res.status(500).json({ok:false,error:"Logout failed."}); req.session.destroy(() => { res.clearCookie("dimuwa.sid"); res.json({ok:true}); }); }));
+app.post("/auth/login", (req, res, next) => {
+  if (!authConfigured) return res.status(503).json({ok:false,error:"Set SESSION_SECRET and ADMIN_PASSWORD in Railway Variables first."});
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  if (email === ADMIN_EMAIL) {
+    const expected = String(process.env.ADMIN_PASSWORD || "");
+    const a = Buffer.from(password); const b = Buffer.from(expected);
+    if (!expected || a.length !== b.length || !crypto.timingSafeEqual(a,b)) return res.status(401).json({ok:false,error:"Invalid email or password."});
+    const old = accountDB[email] || {};
+    accountDB[email] = { ...old, email, name:old.name || "DIMUTH SATHSARA", photo:"", createdAt:old.createdAt || Date.now(), lastLoginAt:Date.now(), blocked:false };
+    writeJson(ACCOUNTS_FILE,accountDB);
+  } else {
+    const account = accountDB[email];
+    if (!account || !passwordMatches(password,account)) return res.status(401).json({ok:false,error:"Invalid email or password."});
+    if (account.blocked) return res.status(403).json({ok:false,error:"This account is blocked. Contact the administrator."});
+    account.lastLoginAt=Date.now(); writeJson(ACCOUNTS_FILE,accountDB);
+  }
+  req.login(safeUser(email), err => { if (err) return next(err); res.json({ok:true,user:safeUser(email)}); });
+});
+app.post("/auth/logout", (req,res) => {
+  req.logout(err => { if (err) return res.status(500).json({ok:false,error:"Logout failed."}); req.session.destroy(() => { res.clearCookie("dimuwa.sid"); res.json({ok:true}); }); });
+});
 app.get("/api/account", requireAuth, (req,res) => {
   const email = String(req.user.email).toLowerCase();
   const owned = botsForAccount(email);
@@ -145,7 +176,7 @@ app.get("/api/account", requireAuth, (req,res) => {
 });
 app.get("/api/admin/overview", requireAuth, requireAdmin, (req,res) => {
   const allBots = Object.entries(botOwnersDB).map(([username,meta])=>({ username, email:meta.email, createdAt:meta.createdAt, expiresAt:meta.expiresAt, expired:Date.now()>=meta.expiresAt, online:isConnected(bots.get(username)) }));
-  const accounts = Object.values(accountDB).map(a=>({ ...a, bots:allBots.filter(b=>b.email===a.email).length, online:allBots.filter(b=>b.email===a.email && b.online).length, offline:allBots.filter(b=>b.email===a.email && !b.online).length }));
+  const accounts = Object.values(accountDB).map(a=>({ email:a.email, name:a.name || a.email, photo:a.photo || "", createdAt:a.createdAt, lastLoginAt:a.lastLoginAt, blocked:!!a.blocked, bots:allBots.filter(b=>b.email===a.email).length, online:allBots.filter(b=>b.email===a.email && b.online).length, offline:allBots.filter(b=>b.email===a.email && !b.online).length }));
   res.json({ok:true, accounts, bots:allBots, totalBots:allBots.length, onlineBots:allBots.filter(b=>b.online).length, offlineBots:allBots.filter(b=>!b.online).length});
 });
 app.post("/api/admin/accounts/:email/block", requireAuth, requireAdmin, (req,res)=>{
@@ -1602,27 +1633,6 @@ async function getPairingCode(username, phone) {
   })();
   try { return await sock.__pairingRequest; } finally { sock.__pairingRequest = null; }
 }
-
-// Require Google authentication for every dashboard/bot API. Public OAuth routes above remain public.
-app.use(["/get-pairing-code", "/qr", "/details", "/stats", "/settings", "/logout", "/unlink"], requireAuth, (req,res,next) => {
-  try {
-    const username = req.query.username;
-    if (!username) return res.status(400).json({ok:false,error:"Username is required."});
-    const clean = cleanUsername(username);
-    const owner = botOwnersDB[clean];
-    const email = String(req.user.email).toLowerCase();
-    if (owner && owner.email !== email && email !== ADMIN_EMAIL) return res.status(403).json({ok:false,error:"This bot belongs to another account."});
-    if (!owner) {
-      // Only claim/count a bot when the user actually requests a pairing code or QR.
-      // Refreshing details/statistics/settings must never consume the monthly quota.
-      if (req.path === "/get-pairing-code" || req.path === "/qr") claimBotForUser(clean, req);
-      else return res.status(404).json({ok:false,error:"No bot has been created for this username yet."});
-    }
-    const currentOwner = botOwnersDB[clean];
-    if (currentOwner && Date.now() >= currentOwner.expiresAt) return res.status(410).json({ok:false,error:"This bot has expired."});
-    next();
-  } catch(e) { res.status(e.status || 400).json({ok:false,error:e.message}); }
-});
 
 // ==========================================
 // EXPRESS ROUTES
