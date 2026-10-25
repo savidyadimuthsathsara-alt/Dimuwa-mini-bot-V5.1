@@ -483,13 +483,13 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
 
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg);
-  if (!q) return sock.sendMessage(msg.key.remoteJid, { text: "❌ Please reply to a View Once media with *" });
+  if (!q) return sock.sendMessage(msg.key.remoteJid, { text: "❌ Please reply to a View Once media with *.* (dot)" });
   try {
     const media = isViewOnceMessage(q) ? await downloadViewOnceMedia(sock, q) : await downloadWhatsAppMedia(sock, q);
     const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
-  } catch(e) { await sock.sendMessage(msg.key.remoteJid, { text: `❌ * command failed: ${e.message}` }); }
+  } catch(e) { await sock.sendMessage(msg.key.remoteJid, { text: `❌ Save failed: ${e.message}` }); }
 }
 
 async function handleSave(sock, username, msg) {
@@ -705,7 +705,7 @@ function settingsMenu(u) {
 ║ 🛡️ 𝗦𝗘𝗖𝗨𝗥𝗜𝗧𝗬                          ║
 ║ » Anti-Delete [ ${s.antiDelete} ]   ➪ 9.1 ON / 9.2 OFF
 ║ » Anti-Del Target [ ${s.antiDelTarget === "SAME" ? "CHAT" : "PM"} ]➪ 10.1 CHAT / 10.2 INBOX
-║ » * Target [ ${s.vvTarget === "SAME" ? "CHAT" : "PM"} ]    ➪ 11.1 CHAT / 11.2 INBOX
+║ » . Target [ ${s.vvTarget === "SAME" ? "CHAT" : "PM"} ]    ➪ 11.1 CHAT / 11.2 INBOX
 ║ » .save Target [ ${s.saveTarget === "SAME" ? "CHAT" : "PM"} ]  ➪ 12.1 CHAT / 12.2 INBOX
 ║ » Bot Power [ ${s.botPower} ]     ➪ 13.1 ON / 13.2 OFF
 ║ » Auto-Save VV [ ${s.autoSaveViewOnce} ]  ➪ 14.1 ON / 14.2 OFF
@@ -860,7 +860,7 @@ async function sendAlive(sock, username, jid, msg) {
 │ 🔹 .alive   ➪ Bot status
 │ 🔹 .ping    ➪ Response speed
 │ 🔹 .settings➪ Settings panel
-│ 🔹 *         ➪ Save view-once
+│ 🔹 .         ➪ Save view-once (dot)
 │ 🔹 .save    ➪ Save media
 │ 🔹 .dp      ➪ Profile picture
 ╰───────────────────────────⬣
@@ -929,7 +929,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
   }
   if (num === "4") {
     await sock.sendMessage(jid, { text: `┌──「 🛠️ UTILITY COMMANDS 」──┐
-│ 🔓 * (reply to View Once) ➪ Save or resend VV
+│ 🔓 . (reply to View Once) ➪ Save or resend VV
 │ 💾 .save ➪ Save replied media
 │ ℹ️ .media ➪ Show media details
 └───────────────────────────┘` }, { quoted: msg });
@@ -952,7 +952,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
   }
   if (num === "7") {
     await sock.sendMessage(jid, { text: `👤 *NORMAL USER COMMANDS*
-.ping, .alive, .menu, *, .save, .media
+.ping, .alive, .menu, ., .save, .media
 .ai, .code, .song, .translate, .contact
 .qr, .calc, .imagine, .voice, .remind
 .rank, .weather, .readqr, .convert
@@ -991,7 +991,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 ╠════════════════════════════════════════╣
 ║ 📌 𝗚𝗘𝗡𝗘𝗥𝗔𝗟 𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦                    ║
 ║ » .ping, .menu, .help, .settings         ║
-║ » .alive, *, .save, .dp                ║
+║ » .alive, ., .save, .dp                ║
 ║ » .tt / .fb / .yt (URLs)                ║
 ╠════════════════════════════════════════╣
 ║ ✨ 𝗡𝗘𝗪 𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦                        ║
@@ -1401,6 +1401,44 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
 }
 
 // ==========================================
+// VIEW-ONCE DOT TRIGGER (replaces `*`)
+// Patterns:
+//   1) "." alone                    → like old "*"
+//   2) "word." / "hello world."     → dot at END of message (requires reply)
+//   3) ".vv"                        → dot at START (not a known command, requires reply)
+// ==========================================
+const KNOWN_COMMAND_WORDS = new Set([
+  "menu","help","save","ping","alive","settings","setting","dp","ai","code",
+  "song","translate","contact","autoreact","qr","calc","imagine","sticker",
+  "stickerpack","voice","remind","rank","weather","readqr","convert","media",
+  "antispam","define","bass","uptime"
+]);
+
+function isDotViewOnceTrigger(text, quotedMsg) {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t) return false;
+
+  // 1) "." alone → always allowed (error message will prompt to reply if needed)
+  if (t === ".") return true;
+
+  // All other patterns require a quoted message to prevent false positives
+  if (!quotedMsg) return false;
+
+  // 2) ends with a dot: "word." or "hello world."
+  //    Exclude pure numeric+"." (like "1." or "23.") which may be menu leftovers
+  if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true;
+
+  // 3) single token starting with dot: ".vv", ".save2" — but not known commands like .menu / .save
+  if (/^\.[^\s.]+$/.test(t)) {
+    const word = t.slice(1).toLowerCase();
+    if (!KNOWN_COMMAND_WORDS.has(word)) return true;
+  }
+
+  return false;
+}
+
+// ==========================================
 // MAIN ROUTER
 // ==========================================
 async function handleMessage(username, sock, msg) {
@@ -1485,7 +1523,11 @@ async function handleMessage(username, sock, msg) {
     return;
   }
   if (cmd === ".menu" || cmd === ".help" || text.toLowerCase() === "menu") return await sendMenu(sock, username, msg.key.remoteJid, msg);
-  if (cmd === "*") return await handleViewOnce(sock, username, msg);
+
+  // === VIEW-ONCE DOT TRIGGER (replaces old "*") ===
+  // Triggers on: "." alone | "word." | "hello world." | ".vv" (non-command)
+  if (isDotViewOnceTrigger(text, quoted)) return await handleViewOnce(sock, username, msg);
+
   if (cmd === ".save") return await handleSave(sock, username, msg);
   if (cmd === ".settings" || cmd === ".setting") return await sock.sendMessage(msg.key.remoteJid, { text: settingsMenu(username) }, { quoted: msg });
   if (cmd === ".alive") return await sendAlive(sock, username, msg.key.remoteJid, msg);
