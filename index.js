@@ -1564,7 +1564,26 @@ async function startBot(username, opts = {}) {
         qrStore.delete(clean); pairingStore.delete(clean);
         getStats(clean).connectedAt = Date.now(); saveStats();
         const s = getSettings(clean);
-        // Always-online presence feature intentionally disabled as requested.
+        // Always-online is disabled in V5.2. Explicitly publish unavailable
+        // on every successful connection so WhatsApp does not leave this
+        // session marked as available after reconnecting.
+        if (s.alwaysOnline !== "ON") {
+          // Publish offline presence immediately and refresh it periodically.
+          // Some WhatsApp Web sessions can otherwise remain displayed as online
+          // while the linked-device socket stays connected.
+          await sock.sendPresenceUpdate("unavailable").catch(() => {});
+          if (sock.__offlinePresenceTimer) clearInterval(sock.__offlinePresenceTimer);
+          sock.__offlinePresenceTimer = setInterval(() => {
+            const current = getSettings(clean);
+            if (current.alwaysOnline !== "ON" && isConnected(sock)) {
+              sock.sendPresenceUpdate("unavailable").catch(() => {});
+            }
+          }, 30000);
+          if (sock.__offlinePresenceTimer.unref) sock.__offlinePresenceTimer.unref();
+        } else if (sock.__offlinePresenceTimer) {
+          clearInterval(sock.__offlinePresenceTimer);
+          sock.__offlinePresenceTimer = null;
+        }
 
         try {
           const ownerJid = getOwnerJid(sock);
@@ -1577,6 +1596,10 @@ async function startBot(username, opts = {}) {
         } catch {}
       }
       if (connection === "close") {
+        if (sock.__offlinePresenceTimer) {
+          clearInterval(sock.__offlinePresenceTimer);
+          sock.__offlinePresenceTimer = null;
+        }
         bots.delete(clean);
         const code = lastDisconnect?.error?.output?.statusCode;
         if (code === DisconnectReason.loggedOut) return;
