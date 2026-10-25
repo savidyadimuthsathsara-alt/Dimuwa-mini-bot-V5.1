@@ -1,6 +1,10 @@
 "use strict";
 
 const express = require("express");
+const session = require("express-session");
+const FileStoreFactory = require("session-file-store");
+const passport = require("passport");
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const cors = require("cors");
 const pino = require("pino");
 const QRCode = require("qrcode");
@@ -48,14 +52,114 @@ const CREATOR_NAME = "Dimuth Sathsara";
 
 const logger = pino({ level: LOG_LEVEL });
 const app = express();
-app.use(cors());
+app.set("trust proxy", 1); // Railway terminates HTTPS at its proxy.
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(__dirname));
 
 for (const dir of [DATA_DIR, SESSION_DIR, MEDIA_DIR, TOOLS_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
 }
+
+// ==========================================
+// GOOGLE OAUTH + ACCOUNT/BOT ACCESS CONTROL
+// Configure GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL,
+// SESSION_SECRET and DATA_DIR in Railway Variables before enabling login.
+// ==========================================
+const ADMIN_EMAIL = "dimuthsathsara13@gmail.com";
+const ACCOUNTS_FILE = path.join(DATA_DIR, "accounts.json");
+const BOT_OWNERS_FILE = path.join(DATA_DIR, "bot-owners.json");
+const accountDB = readJson(ACCOUNTS_FILE, {});
+const botOwnersDB = readJson(BOT_OWNERS_FILE, {});
+const FileStore = FileStoreFactory(session);
+const oauthConfigured = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.SESSION_SECRET);
+app.use(session({
+  name: "dimuwa.sid",
+  store: new FileStore({ path: path.join(DATA_DIR, "web-sessions"), retries: 0, ttl: 60 * 60 * 24 * 14 }),
+  secret: process.env.SESSION_SECRET || "CONFIGURE_SESSION_SECRET_IN_RAILWAY",
+  resave: false, saveUninitialized: false,
+  cookie: { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", maxAge: 14 * 24 * 60 * 60 * 1000 }
+}));
+app.use(passport.initialize());
+app.use(passport.session());
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) => done(null, user));
+if (oauthConfigured) {
+  passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: process.env.GOOGLE_CALLBACK_URL || "https://" + (process.env.RAILWAY_PUBLIC_DOMAIN || "localhost") + "/auth/google/callback"
+  }, (accessToken, refreshToken, profile, done) => {
+    const email = String(profile.emails?.find(e => e.verified !== false)?.value || "").toLowerCase();
+    const verified = profile.emails?.some(e => e.verified === true);
+    if (!email || !verified) return done(null, false, { message: "A verified Google email is required." });
+    const old = accountDB[email] || {};
+    if (old.blocked) return done(null, false, { message: "This account is blocked. Contact the administrator." });
+    accountDB[email] = { email, name: profile.displayName || email.split("@")[0], photo: profile.photos?.[0]?.value || "", createdAt: old.createdAt || Date.now(), lastLoginAt: Date.now(), blocked: false };
+    writeJson(ACCOUNTS_FILE, accountDB);
+    return done(null, { email, name: accountDB[email].name, photo: accountDB[email].photo, isAdmin: email === ADMIN_EMAIL });
+  }));
+}
+function requireAuth(req, res, next) {
+  if (!req.isAuthenticated?.() || !req.user?.email) return res.status(401).json({ ok:false, error:"Please sign in with Google first.", loginRequired:true });
+  const account = accountDB[String(req.user.email).toLowerCase()];
+  if (!account || account.blocked) return res.status(403).json({ ok:false, error:"Account access is blocked." });
+  next();
+}
+function requireAdmin(req, res, next) {
+  if (!req.user || String(req.user.email).toLowerCase() !== ADMIN_EMAIL) return res.status(403).json({ ok:false, error:"Admin access only." });
+  next();
+}
+function monthKey(ts = Date.now()) { const d = new Date(ts); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}`; }
+function botsForAccount(email) { return Object.entries(botOwnersDB).filter(([name, meta]) => meta.email === email).map(([username, meta]) => ({ username, createdAt: meta.createdAt, expiresAt: meta.expiresAt, expired: Date.now() >= meta.expiresAt, online: isConnected(bots.get(username)) })); }
+function claimBotForUser(username, req) {
+  const clean = cleanUsername(username);
+  const email = String(req.user.email).toLowerCase();
+  const existing = botOwnersDB[clean];
+  if (existing && existing.email !== email && email !== ADMIN_EMAIL) throw Object.assign(new Error("That bot username belongs to another account."), { status: 403 });
+  if (!existing) {
+    const thisMonth = Object.values(botOwnersDB).filter(b => b.email === email && monthKey(b.createdAt) === monthKey()).length;
+    if (thisMonth >= 5 && email !== ADMIN_EMAIL) throw Object.assign(new Error("Monthly bot limit reached (5 bots per month)."), { status: 429 });
+    botOwnersDB[clean] = { email, createdAt: Date.now(), expiresAt: Date.now() + 20 * 24 * 60 * 60 * 1000 };
+    writeJson(BOT_OWNERS_FILE, botOwnersDB);
+  }
+  const meta = botOwnersDB[clean];
+  if (Date.now() >= meta.expiresAt) throw Object.assign(new Error("This bot has expired. Its 20-day validity period has ended."), { status: 410 });
+  return clean;
+}
+app.get("/auth/status", (req, res) => {
+  const savedAccount = req.user ? accountDB[String(req.user.email).toLowerCase()] : null;
+  const user = req.user ? { email:req.user.email, name:req.user.name, photo:req.user.photo, createdAt:savedAccount?.createdAt || null, lastLoginAt:savedAccount?.lastLoginAt || null, isAdmin:String(req.user.email).toLowerCase() === ADMIN_EMAIL } : null;
+  res.json({ ok:true, configured:oauthConfigured, user });
+});
+app.get("/auth/google", (req, res, next) => {
+  if (!oauthConfigured) return res.status(503).send("Google OAuth is not configured. Add GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_CALLBACK_URL and SESSION_SECRET in Railway Variables.");
+  passport.authenticate("google", { scope:["profile", "email"], prompt:"select_account" })(req,res,next);
+});
+app.get("/auth/google/callback", (req,res,next) => passport.authenticate("google", { failureRedirect:"/?login=failed" })(req,res,next), (req,res) => res.redirect("/"));
+app.post("/auth/logout", (req,res) => req.logout(err => { if (err) return res.status(500).json({ok:false,error:"Logout failed."}); req.session.destroy(() => { res.clearCookie("dimuwa.sid"); res.json({ok:true}); }); }));
+app.get("/api/account", requireAuth, (req,res) => {
+  const email = String(req.user.email).toLowerCase();
+  const owned = botsForAccount(email);
+  res.json({ ok:true, user:req.user, bots:owned, monthlyCreated:Object.values(botOwnersDB).filter(b=>b.email===email && monthKey(b.createdAt)===monthKey()).length, monthlyLimit: email === ADMIN_EMAIL ? "Unlimited" : 5 });
+});
+app.get("/api/admin/overview", requireAuth, requireAdmin, (req,res) => {
+  const allBots = Object.entries(botOwnersDB).map(([username,meta])=>({ username, email:meta.email, createdAt:meta.createdAt, expiresAt:meta.expiresAt, expired:Date.now()>=meta.expiresAt, online:isConnected(bots.get(username)) }));
+  const accounts = Object.values(accountDB).map(a=>({ ...a, bots:allBots.filter(b=>b.email===a.email).length, online:allBots.filter(b=>b.email===a.email && b.online).length, offline:allBots.filter(b=>b.email===a.email && !b.online).length }));
+  res.json({ok:true, accounts, bots:allBots, totalBots:allBots.length, onlineBots:allBots.filter(b=>b.online).length, offlineBots:allBots.filter(b=>!b.online).length});
+});
+app.post("/api/admin/accounts/:email/block", requireAuth, requireAdmin, (req,res)=>{
+  const email=String(req.params.email||"").toLowerCase();
+  if (email===ADMIN_EMAIL) return res.status(400).json({ok:false,error:"The administrator account cannot be blocked here."});
+  if (!accountDB[email]) return res.status(404).json({ok:false,error:"Account not found."});
+  accountDB[email].blocked=true; writeJson(ACCOUNTS_FILE,accountDB); res.json({ok:true});
+});
+app.post("/api/admin/accounts/:email/unblock", requireAuth, requireAdmin, (req,res)=>{
+  const email=String(req.params.email||"").toLowerCase();
+  if (!accountDB[email]) return res.status(404).json({ok:false,error:"Account not found."});
+  accountDB[email].blocked=false; writeJson(ACCOUNTS_FILE,accountDB); res.json({ok:true});
+});
+app.use(express.static(__dirname));
 
 const DEFAULT_SETTINGS = {
   alwaysOnline: "OFF",
@@ -130,9 +234,10 @@ function getSettings(u) {
   const k = cleanUsername(u);
   if (!settingsDB[k]) { settingsDB[k] = { ...DEFAULT_SETTINGS }; writeJson(SETTINGS_FILE, settingsDB); }
   else settingsDB[k] = { ...DEFAULT_SETTINGS, ...settingsDB[k] };
+  settingsDB[k].alwaysOnline = "OFF";
   return settingsDB[k];
 }
-function saveSettings(u, s) { settingsDB[cleanUsername(u)] = { ...DEFAULT_SETTINGS, ...s }; writeJson(SETTINGS_FILE, settingsDB); }
+function saveSettings(u, s) { settingsDB[cleanUsername(u)] = { ...DEFAULT_SETTINGS, ...s, alwaysOnline: "OFF" }; writeJson(SETTINGS_FILE, settingsDB); }
 
 function getStats(u) {
   const k = cleanUsername(u);
@@ -336,7 +441,7 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
     if (sender && jidNumber(sender) === jidNumber(owner)) return false;
     
     const media = await downloadViewOnceMedia(sock, msg);
-    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.4`;
+    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.2`;
     
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
     logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
@@ -557,7 +662,7 @@ function settingsMenu(u) {
 ║ ⚠️ 𝗢𝘄𝗻𝗲𝗿 𝗢𝗻𝗹𝘆 | 𝗥𝗲𝗽𝗹𝘆 𝘄𝗶𝘁𝗵 𝗮 𝗰𝗼𝗱𝗲     ║
 ╠════════════════════════════════════════╣
 ║ 🌐 𝗣𝗥𝗘𝗦𝗘𝗡𝗖𝗘 & 𝗦𝗖𝗢𝗣𝗘                   ║
-║ » Always Online [ ${s.alwaysOnline} ] ➪ 1.1 ON / 1.2 OFF
+║ » Always Online [ OFF ] ➪ Disabled in V5.2
 ║ » Auto Read [ ${s.autoRead} ]    ➪ 2.1 ON / 2.2 OFF
 ║ » Bot Mode [ ${s.botMode} ]  ➪ 3.1 PUB / 3.2 PRI / 3.3 INB
 ╠════════════════════════════════════════╣
@@ -571,7 +676,7 @@ function settingsMenu(u) {
 ║ 🛡️ 𝗦𝗘𝗖𝗨𝗥𝗜𝗧𝗬                          ║
 ║ » Anti-Delete [ ${s.antiDelete} ]   ➪ 9.1 ON / 9.2 OFF
 ║ » Anti-Del Target [ ${s.antiDelTarget === "SAME" ? "CHAT" : "PM"} ]➪ 10.1 CHAT / 10.2 INBOX
-║ » .vv Target [ ${s.vvTarget === "SAME" ? "CHAT" : "PM"} ]    ➪ 11.1 CHAT / 11.2 INBOX
+║ » * Target [ ${s.vvTarget === "SAME" ? "CHAT" : "PM"} ]    ➪ 11.1 CHAT / 11.2 INBOX
 ║ » .save Target [ ${s.saveTarget === "SAME" ? "CHAT" : "PM"} ]  ➪ 12.1 CHAT / 12.2 INBOX
 ║ » Bot Power [ ${s.botPower} ]     ➪ 13.1 ON / 13.2 OFF
 ║ » Auto-Save VV [ ${s.autoSaveViewOnce} ]  ➪ 14.1 ON / 14.2 OFF
@@ -726,7 +831,7 @@ async function sendAlive(sock, username, jid, msg) {
 │ 🔹 .alive   ➪ Bot status
 │ 🔹 .ping    ➪ Response speed
 │ 🔹 .settings➪ Settings panel
-│ 🔹 .vv      ➪ Save view-once
+│ 🔹 *         ➪ Save view-once
 │ 🔹 .save    ➪ Save media
 │ 🔹 .dp      ➪ Profile picture
 ╰───────────────────────────⬣
@@ -795,7 +900,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
   }
   if (num === "4") {
     await sock.sendMessage(jid, { text: `┌──「 🛠️ UTILITY COMMANDS 」──┐
-│ 🔓 .vv / .viewonce ➪ Save or resend VV
+│ 🔓 * (reply to View Once) ➪ Save or resend VV
 │ 💾 .save ➪ Save replied media
 │ ℹ️ .media ➪ Show media details
 └───────────────────────────┘` }, { quoted: msg });
@@ -818,7 +923,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
   }
   if (num === "7") {
     await sock.sendMessage(jid, { text: `👤 *NORMAL USER COMMANDS*
-.ping, .alive, .menu, .vv, .save, .media
+.ping, .alive, .menu, *, .save, .media
 .ai, .code, .song, .translate, .contact
 .qr, .calc, .imagine, .voice, .remind
 .rank, .weather, .readqr, .convert
@@ -857,7 +962,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 ╠════════════════════════════════════════╣
 ║ 📌 𝗚𝗘𝗡𝗘𝗥𝗔𝗟 𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦                    ║
 ║ » .ping, .menu, .help, .settings         ║
-║ » .alive, .vv, .save, .dp                ║
+║ » .alive, *, .save, .dp                ║
 ║ » .tt / .fb / .yt (URLs)                ║
 ╠════════════════════════════════════════╣
 ║ ✨ 𝗡𝗘𝗪 𝗖𝗢𝗠𝗠𝗔𝗡𝗗𝗦                        ║
@@ -1061,7 +1166,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
       const video = search.videos[0];
       if (!video) throw new Error("No results found.");
 
-      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author.name}\n⏱ *Duration:* ${video.timestamp}\n👀 *Views:* ${video.views}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.4`;
+      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author.name}\n⏱ *Duration:* ${video.timestamp}\n👀 *Views:* ${video.views}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.2`;
       
       await sock.sendMessage(jid, { image: { url: video.thumbnail }, caption: caption }, { quoted: msg });
     } catch(e) { 
@@ -1270,6 +1375,12 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
 // MAIN ROUTER
 // ==========================================
 async function handleMessage(username, sock, msg) {
+  const accessMeta = botOwnersDB?.[cleanUsername(username)];
+  if (accessMeta && Date.now() >= accessMeta.expiresAt) {
+    try { await sock.logout(); } catch {}
+    bots.delete(cleanUsername(username));
+    return;
+  }
   if (!msg?.message || !msg?.key) return;
 
   const protocolMsg = msg.message.protocolMessage;
@@ -1368,7 +1479,7 @@ async function handleMessage(username, sock, msg) {
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
-      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.4` }, { quoted: msg });
+      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.2` }, { quoted: msg });
       return;
     }
   }
@@ -1381,6 +1492,9 @@ async function handleMessage(username, sock, msg) {
 // ==========================================
 async function startBot(username, opts = {}) {
   const clean = cleanUsername(username);
+  const access = botOwnersDB[clean];
+  if (!access) throw new Error("This bot is not registered to an account.");
+  if (Date.now() >= access.expiresAt) throw new Error("This bot has expired. Its 20-day validity period has ended.");
   if (bots.has(clean)) return bots.get(clean);
   if (startingBots.has(clean)) return startingBots.get(clean);
 
@@ -1489,6 +1603,27 @@ async function getPairingCode(username, phone) {
   try { return await sock.__pairingRequest; } finally { sock.__pairingRequest = null; }
 }
 
+// Require Google authentication for every dashboard/bot API. Public OAuth routes above remain public.
+app.use(["/get-pairing-code", "/qr", "/details", "/stats", "/settings", "/logout", "/unlink"], requireAuth, (req,res,next) => {
+  try {
+    const username = req.query.username;
+    if (!username) return res.status(400).json({ok:false,error:"Username is required."});
+    const clean = cleanUsername(username);
+    const owner = botOwnersDB[clean];
+    const email = String(req.user.email).toLowerCase();
+    if (owner && owner.email !== email && email !== ADMIN_EMAIL) return res.status(403).json({ok:false,error:"This bot belongs to another account."});
+    if (!owner) {
+      // Only claim/count a bot when the user actually requests a pairing code or QR.
+      // Refreshing details/statistics/settings must never consume the monthly quota.
+      if (req.path === "/get-pairing-code" || req.path === "/qr") claimBotForUser(clean, req);
+      else return res.status(404).json({ok:false,error:"No bot has been created for this username yet."});
+    }
+    const currentOwner = botOwnersDB[clean];
+    if (currentOwner && Date.now() >= currentOwner.expiresAt) return res.status(410).json({ok:false,error:"This bot has expired."});
+    next();
+  } catch(e) { res.status(e.status || 400).json({ok:false,error:e.message}); }
+});
+
 // ==========================================
 // EXPRESS ROUTES
 // ==========================================
@@ -1537,6 +1672,18 @@ app.post("/unlink", async (req, res) => {
   res.json({ ok: true });
 });
 
+// Stop expired bots even if they receive no further messages.
+setInterval(async () => {
+  for (const [username, meta] of Object.entries(botOwnersDB)) {
+    if (Date.now() < meta.expiresAt) continue;
+    const sock = bots.get(username);
+    if (sock) {
+      try { await sock.logout(); } catch {}
+      bots.delete(username);
+    }
+  }
+}, 60 * 1000).unref();
+
 // ==========================================
 // START
 // ==========================================
@@ -1544,6 +1691,12 @@ app.listen(PORT, "0.0.0.0", () => logger.info(`Server started on ${PORT}`));
 (async () => {
   if (!fs.existsSync(SESSION_DIR)) return;
   for (const f of await fsp.readdir(SESSION_DIR, { withFileTypes: true })) {
-    if (f.isDirectory() && f.name.startsWith("session_")) await startBot(f.name.replace("session_","")).catch(()=>{});
+    if (!f.isDirectory() || !f.name.startsWith("session_")) continue;
+    const username = cleanUsername(f.name.slice("session_".length));
+    if (!botOwnersDB[username]) {
+      botOwnersDB[username] = { email: ADMIN_EMAIL, createdAt: Date.now(), expiresAt: Date.now() + 20 * 24 * 60 * 60 * 1000 };
+      writeJson(BOT_OWNERS_FILE, botOwnersDB);
+    }
+    if (Date.now() < botOwnersDB[username].expiresAt) await startBot(username).catch(()=>{});
   }
 })();
