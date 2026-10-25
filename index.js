@@ -51,7 +51,7 @@ const CREATOR_NAME = "Dimuth Sathsara";
 
 const logger = pino({ level: LOG_LEVEL });
 const app = express();
-app.set("trust proxy", 1); // Railway terminates HTTPS at its proxy.
+app.set("trust proxy", 1); 
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -62,7 +62,6 @@ for (const dir of [DATA_DIR, SESSION_DIR, MEDIA_DIR, TOOLS_DIR]) {
 
 // ==========================================
 // PASSWORD LOGIN + ACCOUNT/BOT ACCESS CONTROL
-// Set SESSION_SECRET and ADMIN_PASSWORD in your hosting environment variables.
 // ==========================================
 const ADMIN_EMAIL = "dimuthsathsara13@gmail.com";
 const ACCOUNTS_FILE = path.join(DATA_DIR, "accounts.json");
@@ -71,7 +70,6 @@ const accountDB = readJson(ACCOUNTS_FILE, {});
 const botOwnersDB = readJson(BOT_OWNERS_FILE, {});
 const FileStore = FileStoreFactory(session);
 const authConfigured = !!(process.env.SESSION_SECRET && process.env.ADMIN_PASSWORD);
-// Trust the HTTPS reverse proxy used by hosted platforms so secure session cookies persist.
 app.set("trust proxy", 1);
 fs.mkdirSync(path.join(DATA_DIR, "web-sessions"), { recursive: true });
 app.use(session({
@@ -328,7 +326,7 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS (FIXED)
+// STATUS
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
@@ -344,10 +342,7 @@ async function handleStatus(username, sock, msg) {
     if (s.statusReact === "RANDOM") {
       emoji = statusReactList[Math.floor(Math.random() * statusReactList.length)];
     }
-
     try {
-      // Status reactions need the original status message key and statusJidList.
-      // Keep the reaction scoped to the person who posted this status.
       await sock.sendMessage("status@broadcast", {
         react: { text: emoji, key: msg.key }
       }, {
@@ -481,15 +476,25 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
   }
 }
 
+// ==========================================
+// VIEW ONCE & SAVE COMMAND (SILENT ERRORS)
+// ==========================================
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg);
-  if (!q) return sock.sendMessage(msg.key.remoteJid, { text: "❌ Please reply to a View Once media with *.* (dot)" });
+  if (!q) return; // Reply නැත්නම් මොකුත් නොකර ඉන්නවා
+  
+  // Onetime (View Once) එකක් නෙවෙයි නම් මොකුත් නොකර ඉන්නවා
+  if (!isViewOnceMessage(q)) return; 
+
   try {
-    const media = isViewOnceMessage(q) ? await downloadViewOnceMedia(sock, q) : await downloadWhatsAppMedia(sock, q);
+    const media = await downloadViewOnceMedia(sock, q);
     const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
-    if (!target) throw new Error("No target JID");
+    if (!target) return;
     await sendWhatsAppMedia(sock, target, media);
-  } catch(e) { await sock.sendMessage(msg.key.remoteJid, { text: `❌ Save failed: ${e.message}` }); }
+  } catch(e) { 
+    // Error මැසේජ් එවන්නේ නෑ, Console එකේ විතරක් ලොග් වෙනවා
+    logger.error(`ViewOnce save error: ${e.message}`); 
+  }
 }
 
 async function handleSave(sock, username, msg) {
@@ -499,7 +504,10 @@ async function handleSave(sock, username, msg) {
     const target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
-  } catch(e) { await sock.sendMessage(msg.key.remoteJid, { text: `❌ .save failed: ${e.message}` }); }
+  } catch(e) { 
+    // .save එකේ error එකත් console එකට විතරයි
+    logger.error(`.save error: ${e.message}`); 
+  }
 }
 
 // ==========================================
@@ -543,7 +551,6 @@ async function aiChat(query, options = {}) {
 // ==========================================
 async function aiImage(prompt) {
   const seed = Math.floor(Math.random()*1000000);
-  // FIXED: New Pollinations endpoint
   const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}`;
   try {
     const res = await axios.get(url, { responseType: "arraybuffer", timeout: 60000, headers: { "User-Agent": "Mozilla/5.0" } });
@@ -785,7 +792,7 @@ async function processSettingsCode(sock, u, msg, code) {
 
 function menuText(u) {
   const s = getSettings(u);
-  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
+  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟰 🤖 👑
 
 ╭─── « 👨‍💻 𝗖𝗥𝗘𝗔𝗧𝗢𝗥 𝗜𝗡𝗙𝗢 » ───⬣
 │ 👨‍💻 𝗖𝗿𝗲𝗮𝘁𝗼𝗿 : Dimuth Sathsara
@@ -832,7 +839,7 @@ async function sendAlive(sock, username, jid, msg) {
   const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
   const phone = jidNumber(getOwnerJid(sock));
 
-  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟰 🤖 👑
+  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
 
 ╭─── « 🟢 𝗕𝗢𝗧 𝗔𝗟𝗜𝗩𝗘 » ───⬣
 │ 🟢 𝗦𝘁𝗮𝘁𝘂𝘀   : Online ✅
@@ -1401,11 +1408,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
 }
 
 // ==========================================
-// VIEW-ONCE DOT TRIGGER (replaces `*`)
-// Patterns:
-//   1) "." alone                    → like old "*"
-//   2) "word." / "hello world."     → dot at END of message (requires reply)
-//   3) ".vv"                        → dot at START (not a known command, requires reply)
+// VIEW-ONCE DOT TRIGGER LOGIC
 // ==========================================
 const KNOWN_COMMAND_WORDS = new Set([
   "menu","help","save","ping","alive","settings","setting","dp","ai","code",
@@ -1525,7 +1528,6 @@ async function handleMessage(username, sock, msg) {
   if (cmd === ".menu" || cmd === ".help" || text.toLowerCase() === "menu") return await sendMenu(sock, username, msg.key.remoteJid, msg);
 
   // === VIEW-ONCE DOT TRIGGER (replaces old "*") ===
-  // Triggers on: "." alone | "word." | "hello world." | ".vv" (non-command)
   if (isDotViewOnceTrigger(text, quoted)) return await handleViewOnce(sock, username, msg);
 
   if (cmd === ".save") return await handleSave(sock, username, msg);
@@ -1563,9 +1565,6 @@ async function handleMessage(username, sock, msg) {
 // ==========================================
 async function startBot(username, opts = {}) {
   const clean = cleanUsername(username);
-  // Preserve the original pairing/QR behavior: startBot must not reject a username
-  // before the authenticated pairing/QR route has a chance to register it.
-  // Account limits and expiry remain enforced by claimBotForUser on those routes.
   if (bots.has(clean)) return bots.get(clean);
   if (startingBots.has(clean)) return startingBots.get(clean);
 
@@ -1606,13 +1605,7 @@ async function startBot(username, opts = {}) {
         qrStore.delete(clean); pairingStore.delete(clean);
         getStats(clean).connectedAt = Date.now(); saveStats();
         const s = getSettings(clean);
-        // Always-online is disabled in V5.2. Explicitly publish unavailable
-        // on every successful connection so WhatsApp does not leave this
-        // session marked as available after reconnecting.
         if (s.alwaysOnline !== "ON") {
-          // Publish offline presence immediately and refresh it periodically.
-          // Some WhatsApp Web sessions can otherwise remain displayed as online
-          // while the linked-device socket stays connected.
           await sock.sendPresenceUpdate("unavailable").catch(() => {});
           if (sock.__offlinePresenceTimer) clearInterval(sock.__offlinePresenceTimer);
           sock.__offlinePresenceTimer = setInterval(() => {
@@ -1702,7 +1695,6 @@ async function getPairingCode(username, phone) {
 // ==========================================
 app.get("/get-pairing-code", requireAuth, async (req, res) => {
   try {
-    // Register/claim this bot for the signed-in account before starting the old pairing flow.
     const u = claimBotForUser(req.query.username, req);
     res.json({ ok: true, ...(await getPairingCode(u, req.query.phone)) });
   }
@@ -1710,7 +1702,6 @@ app.get("/get-pairing-code", requireAuth, async (req, res) => {
 });
 app.get("/qr", requireAuth, async (req, res) => {
   try {
-    // Register/claim this bot for the signed-in account before starting the old QR flow.
     const u = claimBotForUser(req.query.username, req);
     let s = bots.get(u);
     if (!s && !startingBots.has(u)) { qrStore.delete(u); s = await startBot(u); }
