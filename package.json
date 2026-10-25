@@ -1,7 +1,7 @@
 {
   "name": "dimuwa-mini-bot",
   "version": "5.2.0",
-  "description": "DIMUWA WhatsApp Mini Bot V5.2",
+  "description": "DIMUWA WhatsApp Mini Bot V5.2 - Password Login",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -23,7 +23,6 @@
     "yt-search": "^2.12.1",
     "express-session": "^1.18.2",
     "session-file-store": "^1.5.0",
-    "passport": "^0.7.0",
-    "passport-google-oauth20": "^2.0.0"
+    "passport": "^0.7.0"
   }
 }
