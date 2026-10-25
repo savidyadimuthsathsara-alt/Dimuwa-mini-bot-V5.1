@@ -1523,9 +1523,9 @@ async function handleMessage(username, sock, msg) {
 // ==========================================
 async function startBot(username, opts = {}) {
   const clean = cleanUsername(username);
-  const access = botOwnersDB[clean];
-  if (!access) throw new Error("This bot is not registered to an account.");
-  if (Date.now() >= access.expiresAt) throw new Error("This bot has expired. Its 20-day validity period has ended.");
+  // Preserve the original pairing/QR behavior: startBot must not reject a username
+  // before the authenticated pairing/QR route has a chance to register it.
+  // Account limits and expiry remain enforced by claimBotForUser on those routes.
   if (bots.has(clean)) return bots.get(clean);
   if (startingBots.has(clean)) return startingBots.get(clean);
 
@@ -1637,13 +1637,18 @@ async function getPairingCode(username, phone) {
 // ==========================================
 // EXPRESS ROUTES
 // ==========================================
-app.get("/get-pairing-code", async (req, res) => {
-  try { res.json({ ok: true, ...(await getPairingCode(req.query.username, req.query.phone)) }); }
-  catch(e) { res.status(500).json({ ok: false, error: e.message }); }
-});
-app.get("/qr", async (req, res) => {
+app.get("/get-pairing-code", requireAuth, async (req, res) => {
   try {
-    const u = cleanUsername(req.query.username);
+    // Register/claim this bot for the signed-in account before starting the old pairing flow.
+    const u = claimBotForUser(req.query.username, req);
+    res.json({ ok: true, ...(await getPairingCode(u, req.query.phone)) });
+  }
+  catch(e) { res.status(e.status || 500).json({ ok: false, error: e.message }); }
+});
+app.get("/qr", requireAuth, async (req, res) => {
+  try {
+    // Register/claim this bot for the signed-in account before starting the old QR flow.
+    const u = claimBotForUser(req.query.username, req);
     let s = bots.get(u);
     if (!s && !startingBots.has(u)) { qrStore.delete(u); s = await startBot(u); }
     else if (!s) s = await startBot(u);
@@ -1652,7 +1657,7 @@ app.get("/qr", async (req, res) => {
     for (let i=0;i<50;i++) { if (qrStore.has(u)) { qr = qrStore.get(u); break; } await new Promise(r=>setTimeout(r,500)); }
     if (!qr) throw new Error("QR not ready");
     res.json({ ok: true, qr });
-  } catch(e) { res.status(503).json({ ok: false, error: e.message }); }
+  } catch(e) { res.status(e.status || 503).json({ ok: false, error: e.message }); }
 });
 app.get("/details", async (req, res) => {
   const u = cleanUsername(req.query.username);
