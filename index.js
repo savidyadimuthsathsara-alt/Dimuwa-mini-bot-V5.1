@@ -1024,7 +1024,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 function isSupportedUrl(url) { return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); }
 
 async function ensureYtDlp() {
-  // ffmpeg check (audio extract / video+audio merge needs ffmpeg)
+  // ffmpeg check
   try {
     await execFileAsync("ffmpeg", ["-version"], { timeout: 10000 });
   } catch {
@@ -1035,7 +1035,6 @@ async function ensureYtDlp() {
   if (fs.existsSync(binary)) {
     const age = (Date.now() - fs.statSync(binary).mtimeMs) / (1000*60*60);
     if (age < 24) {
-      // verify binary is not corrupted
       try {
         await execFileAsync(binary, ["--version"], { timeout: 10000 });
         return binary;
@@ -1070,64 +1069,62 @@ async function downloadSocialMedia(username, url, type) {
   const jobId = crypto.randomBytes(8).toString("hex");
   const outputTemplate = path.join(MEDIA_DIR, `${jobId}.%(ext)s`);
 
-  let formatArgs, postArgs = [];
-  if (type === "audio") {
-    formatArgs = ["-f", "bestaudio/best"];
-    postArgs = ["-x", "--audio-format", "mp3", "--audio-quality", "128K"];
-  } else if (/youtube|youtu\.be/i.test(url)) {
-    formatArgs = [
-      "-f", "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4]/b",
-      "--merge-output-format", "mp4"
-    ];
-  } else if (/facebook|fb\./i.test(url)) {
-    formatArgs = ["-f", "bv*+ba/b"];
-  } else {
-    formatArgs = ["-f", "b/best"];
-  }
+  // Use single-file formats so downloads do not depend on ffmpeg being
+  // installed on the hosting server. Audio is sent in its original format.
+  const formatArgs = type === "audio"
+    ? ["-f", "bestaudio/best"]
+    : ["-f", "best[ext=mp4]/best"];
 
-  const baseArgs = [
-    "--no-warnings","--no-playlist","--restrict-filenames",
-    "--no-check-certificates","--geo-bypass",
-    "--socket-timeout","30","--retries","3","--max-filesize","100M",
-    "--extractor-args","youtube:player_client=ios,android,web",
-    "--user-agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  const args = [
+    "--ignore-config",
+    "--no-warnings",
+    "--no-playlist",
+    "--restrict-filenames",
+    "--socket-timeout", "30",
+    "--retries", "3",
+    "--fragment-retries", "3",
+    "--extractor-retries", "3",
+    "--max-filesize", "100M",
+    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     ...formatArgs,
     "-o", outputTemplate,
-    "--print","after_move:filepath",
+    "--print", "after_move:filepath",
     url
   ];
 
-  let res;
-  try { res = await execFileAsync(ytDlp, [...baseArgs, ...postArgs], { timeout: 300000, maxBuffer: 10*1024*1024 }); }
-  catch (e1) {
-    logger.error("yt-dlp attempt 1 failed: " + (e1.stderr || e1.message));
-    try { res = await execFileAsync(ytDlp, baseArgs, { timeout: 300000, maxBuffer: 10*1024*1024 }); }
-    catch (e2) {
-      logger.error("yt-dlp attempt 2 (no post) failed: " + (e2.stderr || e2.message));
-      
-      let realError = "Unknown Error";
-      if (e2.stderr) {
-          const errorLines = e2.stderr.split('\n');
-          const actualError = errorLines.find(line => line.includes('ERROR:'));
-          if (actualError) realError = actualError.replace('ERROR:', '').trim();
-      }
-      
-      throw new Error(realError);
-    }
+  let result;
+  try {
+    result = await execFileAsync(ytDlp, args, {
+      timeout: 300000,
+      maxBuffer: 10 * 1024 * 1024
+    });
+  } catch (error) {
+    const details = String(error.stderr || error.message || "Unknown downloader error");
+    logger.error("yt-dlp failed: " + details);
+    const errorLine = details.split(/\r?\n/).find(line => line.includes("ERROR:"));
+    throw new Error(errorLine ? errorLine.replace(/^.*ERROR:\s*/, "").trim() : details.trim().slice(-500));
   }
 
-  const candidates = String(res.stdout || "").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
-  let file = candidates.length ? candidates[candidates.length-1] : null;
-  if (file && fs.existsSync(file)) return file;
+  const printedPaths = String(result.stdout || "")
+    .split(/\r?\n/)
+    .map(value => value.trim())
+    .filter(Boolean);
 
-  const files = await fsp.readdir(MEDIA_DIR);
-  const match = files.find(x => x.startsWith(jobId));
-  if (match) return path.join(MEDIA_DIR, match);
-  if (type === "audio") {
-    const am = files.find(x => x.startsWith(jobId) && /\.(mp3|m4a|webm|opus|aac|ogg)$/i.test(x));
-    if (am) return path.join(MEDIA_DIR, am);
+  for (const candidate of printedPaths.reverse()) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
   }
-  throw new Error("File not found after download");
+
+  const matches = (await fsp.readdir(MEDIA_DIR))
+    .filter(name => name.startsWith(jobId))
+    .map(name => path.join(MEDIA_DIR, name));
+
+  for (const candidate of matches) {
+    try {
+      if ((await fsp.stat(candidate)).isFile()) return candidate;
+    } catch {}
+  }
+
+  throw new Error("Downloaded file was not found on the server");
 }
 
 async function executeDownload(sock, username, msg, url, type) {
@@ -1140,13 +1137,22 @@ async function executeDownload(sock, username, msg, url, type) {
     const buffer = await fsp.readFile(file);
 
     if (type === "audio" || [".mp3",".m4a",".aac",".webm",".opus",".ogg"].includes(ext)) {
-      const mimetype = ext === ".mp3" ? "audio/mpeg" : ext === ".m4a" ? "audio/mp4" : "audio/mpeg";
+      const audioMimeTypes = {
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".webm": "audio/webm; codecs=opus",
+        ".opus": "audio/ogg; codecs=opus",
+        ".ogg": "audio/ogg"
+      };
+      const mimetype = audioMimeTypes[ext] || "audio/mpeg";
       await sock.sendMessage(jid, { audio: buffer, mimetype, ptt: false }, { quoted: msg });
     } else if (type === "image" || [".jpg",".jpeg",".png",".webp"].includes(ext)) {
       try { await sock.sendMessage(jid, { image: buffer, caption: "✅ DIMUWA IMAGE" }, { quoted: msg }); }
       catch { await sock.sendMessage(jid, { video: buffer, caption: "✅ DIMUWA MEDIA" }, { quoted: msg }); }
     } else {
-      await sock.sendMessage(jid, { video: buffer, mimetype: "video/mp4", caption: "✅ DIMUWA VIDEO" }, { quoted: msg });
+      const videoMimeType = ext === ".webm" ? "video/webm" : ext === ".mkv" ? "video/x-matroska" : "video/mp4";
+      await sock.sendMessage(jid, { video: buffer, mimetype: videoMimeType, caption: "✅ DIMUWA VIDEO" }, { quoted: msg });
     }
     await fsp.unlink(file).catch(()=>{});
     incrementStat(username, "downloads");
