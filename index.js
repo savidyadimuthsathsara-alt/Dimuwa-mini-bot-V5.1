@@ -1022,10 +1022,25 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 function isSupportedUrl(url) { return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); }
 
 async function ensureYtDlp() {
+  // ffmpeg check (audio extract / video+audio merge needs ffmpeg)
+  try {
+    await execFileAsync("ffmpeg", ["-version"], { timeout: 10000 });
+  } catch {
+    logger.warn("⚠️ ffmpeg not found — audio extract & video+audio merge will fail! Install ffmpeg on the server.");
+  }
+
   const binary = path.join(TOOLS_DIR, "yt-dlp");
   if (fs.existsSync(binary)) {
     const age = (Date.now() - fs.statSync(binary).mtimeMs) / (1000*60*60);
-    if (age < 24) return binary;
+    if (age < 24) {
+      // verify binary is not corrupted
+      try {
+        await execFileAsync(binary, ["--version"], { timeout: 10000 });
+        return binary;
+      } catch {
+        try { fs.unlinkSync(binary); } catch {}
+      }
+    }
   }
   const arch = process.arch === "arm64" ? "_aarch64" : "";
   const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux${arch}`;
@@ -1055,14 +1070,17 @@ async function downloadSocialMedia(username, url, type) {
 
   let formatArgs, postArgs = [];
   if (type === "audio") {
-    formatArgs = ["-f", "bestaudio[ext=m4a]/bestaudio/best[ext=m4a]/best"];
-    postArgs = ["--extract-audio", "--audio-format", "mp3", "--audio-quality", "128K"];
+    formatArgs = ["-f", "bestaudio/best"];
+    postArgs = ["-x", "--audio-format", "mp3", "--audio-quality", "128K"];
   } else if (/youtube|youtu\.be/i.test(url)) {
-    formatArgs = ["-f", "best[ext=mp4]/best[height<=720]/best"];
+    formatArgs = [
+      "-f", "bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4]/b",
+      "--merge-output-format", "mp4"
+    ];
   } else if (/facebook|fb\./i.test(url)) {
-    formatArgs = ["-f", "best[ext=mp4]/best"];
+    formatArgs = ["-f", "bv*+ba/b"];
   } else {
-    formatArgs = ["-f", "best"];
+    formatArgs = ["-f", "b/best"];
   }
 
   const baseArgs = [
@@ -1071,6 +1089,7 @@ async function downloadSocialMedia(username, url, type) {
     "--socket-timeout","30","--retries","3","--max-filesize","100M",
     "--extractor-args","youtube:player_client=ios,android,web",
     "--user-agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "--impersonate", "chrome",
     ...formatArgs,
     "-o", outputTemplate,
     "--print","after_move:filepath",
@@ -1079,9 +1098,13 @@ async function downloadSocialMedia(username, url, type) {
 
   let res;
   try { res = await execFileAsync(ytDlp, [...baseArgs, ...postArgs], { timeout: 300000, maxBuffer: 10*1024*1024 }); }
-  catch {
+  catch (e1) {
+    logger.error("yt-dlp attempt 1 failed: " + (e1.stderr || e1.message));
     try { res = await execFileAsync(ytDlp, baseArgs, { timeout: 300000, maxBuffer: 10*1024*1024 }); }
-    catch (e2) { logger.error("yt-dlp error: " + (e2.stderr || e2.message)); throw new Error("Download failed. Link may be private/unsupported."); }
+    catch (e2) {
+      logger.error("yt-dlp attempt 2 (no post) failed: " + (e2.stderr || e2.message));
+      throw new Error("Download failed. Link may be private/unsupported.");
+    }
   }
 
   const candidates = String(res.stdout || "").split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
