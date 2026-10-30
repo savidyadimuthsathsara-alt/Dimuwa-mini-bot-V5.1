@@ -227,7 +227,9 @@ const DEFAULT_SETTINGS = {
   mediaInfo: "ON",
   dictionary: "ON",
   bassEffect: "ON",
-  uptime: "ON"
+  uptime: "ON",
+  autoTyping: "OFF",  // 👈 අලුත්
+  autoVoice: "OFF"    // 👈 අලුත්
 };
 
 // ==========================================
@@ -481,9 +483,7 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
 // ==========================================
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg);
-  if (!q) return; // Reply නැත්නම් මොකුත් නොකර ඉන්නවා
-  
-  // Onetime (View Once) එකක් නෙවෙයි නම් මොකුත් නොකර ඉන්නවා
+  if (!q) return; 
   if (!isViewOnceMessage(q)) return; 
 
   try {
@@ -492,7 +492,6 @@ async function handleViewOnce(sock, username, msg) {
     if (!target) return;
     await sendWhatsAppMedia(sock, target, media);
   } catch(e) { 
-    // Error මැසේජ් එවන්නේ නෑ, Console එකේ විතරක් ලොග් වෙනවා
     logger.error(`ViewOnce save error: ${e.message}`); 
   }
 }
@@ -505,7 +504,6 @@ async function handleSave(sock, username, msg) {
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
   } catch(e) { 
-    // .save එකේ error එකත් console එකට විතරයි
     logger.error(`.save error: ${e.message}`); 
   }
 }
@@ -708,6 +706,8 @@ function settingsMenu(u) {
 ║ » Composing [ ${s.composing} ]     ➪ 7.1 ON / 7.2 OFF
 ║ » Auto React [ ${s.autoReact} ]   ➪ 39.1 ON / 39.2 OFF
 ║ » Anti-Spam [ ${s.antiSpam} ]    ➪ 40.1 ON / 40.2 OFF
+║ » Auto Typing [ ${s.autoTyping} ] ➪ 41.1 ON / 41.2 OFF
+║ » Auto Voice [ ${s.autoVoice} ]  ➪ 42.1 ON / 42.2 OFF
 ╠════════════════════════════════════════╣
 ║ 🛡️ 𝗦𝗘𝗖𝗨𝗥𝗜𝗧𝗬                          ║
 ║ » Anti-Delete [ ${s.antiDelete} ]   ➪ 9.1 ON / 9.2 OFF
@@ -780,6 +780,8 @@ async function processSettingsCode(sock, u, msg, code) {
     case "38.1": set("uptime","ON"); break; case "38.2": set("uptime","OFF"); break;
     case "39.1": set("autoReact","ON"); break; case "39.2": set("autoReact","OFF"); break;
     case "40.1": set("antiSpam","ON"); break; case "40.2": set("antiSpam","OFF"); break;
+    case "41.1": set("autoTyping","ON"); break; case "41.2": set("autoTyping","OFF"); break;
+    case "42.1": set("autoVoice","ON"); break; case "42.2": set("autoVoice","OFF"); break;
     default: changed = false;
   }
   if (changed) {
@@ -1089,7 +1091,6 @@ async function downloadSocialMedia(username, url, type) {
     "--socket-timeout","30","--retries","3","--max-filesize","100M",
     "--extractor-args","youtube:player_client=ios,android,web",
     "--user-agent","Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "--impersonate", "chrome",
     ...formatArgs,
     "-o", outputTemplate,
     "--print","after_move:filepath",
@@ -1103,7 +1104,15 @@ async function downloadSocialMedia(username, url, type) {
     try { res = await execFileAsync(ytDlp, baseArgs, { timeout: 300000, maxBuffer: 10*1024*1024 }); }
     catch (e2) {
       logger.error("yt-dlp attempt 2 (no post) failed: " + (e2.stderr || e2.message));
-      throw new Error("Download failed. Link may be private/unsupported.");
+      
+      let realError = "Unknown Error";
+      if (e2.stderr) {
+          const errorLines = e2.stderr.split('\n');
+          const actualError = errorLines.find(line => line.includes('ERROR:'));
+          if (actualError) realError = actualError.replace('ERROR:', '').trim();
+      }
+      
+      throw new Error(realError);
     }
   }
 
@@ -1532,7 +1541,18 @@ async function handleMessage(username, sock, msg) {
   }
 
   if (!canProcessMessage(sock, username, msg)) return;
-  if (s.composing === "ON") await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{});
+
+  // === AUTO TYPING / AUTO VOICE (අලුත්) ===
+  const isIncoming = !msg.key.fromMe;
+  if (isIncoming && s.autoVoice === "ON") {
+    await sock.sendPresenceUpdate("recording", msg.key.remoteJid).catch(()=>{});
+    setTimeout(() => sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(()=>{}), 4000);
+  } else if (isIncoming && s.autoTyping === "ON") {
+    await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{});
+    setTimeout(() => sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(()=>{}), 4000);
+  } else if (s.composing === "ON") {
+    await sock.sendPresenceUpdate("composing", msg.key.remoteJid).catch(()=>{});
+  }
 
   const cmd = text.split(/\s+/)[0].toLowerCase();
   const args = text.split(/\s+/);
@@ -1580,7 +1600,10 @@ async function handleMessage(username, sock, msg) {
     }
   }
 
-  await sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(()=>{});
+  // Auto presence ON නම්, timer එකෙන් pause කරයි
+  if (s.autoVoice !== "ON" && s.autoTyping !== "ON") {
+    await sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(()=>{});
+  }
 }
 
 // ==========================================
@@ -1609,7 +1632,14 @@ async function startBot(username, opts = {}) {
     sock.__d = clean;
     bots.set(clean, sock);
     getSettings(clean); getStats(clean);
-    sock.ev.on("creds.update", saveCreds);
+    
+    // creds.update එකේදී ආයේ offline වෙන්න
+    sock.ev.on("creds.update", async () => {
+      await saveCreds();
+      if (isConnected(sock) && getSettings(clean).alwaysOnline !== "ON") {
+        await sock.sendPresenceUpdate("unavailable").catch(() => {});
+      }
+    });
 
     sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
@@ -1636,7 +1666,7 @@ async function startBot(username, opts = {}) {
             if (current.alwaysOnline !== "ON" && isConnected(sock)) {
               sock.sendPresenceUpdate("unavailable").catch(() => {});
             }
-          }, 30000);
+          }, 8000); // 👈 30s එක 8s කළා
           if (sock.__offlinePresenceTimer.unref) sock.__offlinePresenceTimer.unref();
         } else if (sock.__offlinePresenceTimer) {
           clearInterval(sock.__offlinePresenceTimer);
