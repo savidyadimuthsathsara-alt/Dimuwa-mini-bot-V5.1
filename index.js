@@ -26,6 +26,12 @@ try {
   btch = require("btch-downloader");
 } catch {}
 
+let snapsave = null;
+try {
+  const sn = require("snapsave-media-downloader");
+  snapsave = sn.snapsave || sn.default || sn;
+} catch {}
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -34,7 +40,8 @@ const {
   downloadMediaMessage,
   getContentType,
   normalizeMessageContent,
-  fetchLatestWaWebVersion
+  fetchLatestWaWebVersion,
+  jidNormalizedUser
 } = require("@whiskeysockets/baileys");
 
 // ==========================================
@@ -335,36 +342,53 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS (Baileys 7.0.0-rc14 Fixed + Custom Text)
+// STATUS (Baileys 7.0.0-rc14 LID + Receipt Fix)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
   if (msg.key?.fromMe) return;
 
-  const rawParticipant = msg.key?.participant || msg.participant || msg.key?.remoteJid;
+  // Baileys v7 uses participantPn when sender comes as an @lid JID
+  const rawParticipant = msg.key?.participantPn || msg.key?.participant || msg.participant || msg.key?.remoteJid;
   if (!rawParticipant || rawParticipant === "status@broadcast") return;
 
-  const participant = rawParticipant.includes("@")
-    ? `${jidNumber(rawParticipant)}@${rawParticipant.split("@")[1]}`
+  const participant = typeof jidNormalizedUser === "function"
+    ? jidNormalizedUser(rawParticipant)
     : `${jidNumber(rawParticipant)}@s.whatsapp.net`;
 
+  const lidParticipant = msg.key?.participant && String(msg.key.participant).endsWith("@lid")
+    ? msg.key.participant
+    : null;
+
   const ownerJid = getOwnerJid(sock);
+  if (jidNumber(participant) === jidNumber(ownerJid)) return;
+
   const statusKey = {
     remoteJid: "status@broadcast",
     id: msg.key.id,
-    participant: participant,
+    participant: lidParticipant || participant,
     fromMe: false
   };
 
+  // 1) Status Auto-Read (Baileys v7 readMessages + sendReceipt fallback)
   if (s.statusRead === "ON") {
     try {
-      await sock.readMessages([statusKey]);
-    } catch (e) {
-      logger.warn("Status readMessages fallback: " + e.message);
-      await sock.readMessages([msg.key]).catch(() => {});
+      await sock.readMessages([msg.key]);
+    } catch {}
+    if (lidParticipant && lidParticipant !== participant) {
+      try {
+        await sock.readMessages([{ remoteJid: "status@broadcast", id: msg.key.id, participant, fromMe: false }]);
+      } catch {}
     }
+    try {
+      if (typeof sock.sendReceipt === "function") {
+        await sock.sendReceipt("status@broadcast", participant, [msg.key.id], "read");
+      }
+    } catch {}
+    logger.info(`[STATUS READ] Seen status of ${jidNumber(participant)}`);
   }
 
+  // 2) Status Auto-React (GREEN / RANDOM / CUSTOM TEXT)
   if (s.statusReact !== "OFF") {
     let reactText = "💚";
     if (s.statusReact === "RANDOM") {
@@ -373,7 +397,7 @@ async function handleStatus(username, sock, msg) {
       reactText = s.customStatusReact || "💚";
     }
 
-    const jidList = [participant, ownerJid].filter(Boolean);
+    const jidList = Array.from(new Set([participant, lidParticipant, ownerJid].filter(Boolean)));
     try {
       await sock.sendMessage(
         "status@broadcast",
@@ -1068,26 +1092,208 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// MULTI-API + YT-DLP BACKUP DOWNLOADER (100% WORKING)
+// MULTI-API + SCRAPER + YT-DLP DOWNLOADER (100% WORKING)
 // ==========================================
 function isSupportedUrl(url) { return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); }
 
-async function fetchMediaBuffer(mediaUrl) {
+async function fetchMediaBuffer(mediaUrl, extraHeaders = {}) {
+  if (!mediaUrl || typeof mediaUrl !== "string" || !mediaUrl.startsWith("http")) {
+    throw new Error("Invalid media URL");
+  }
   const res = await axios.get(mediaUrl, {
     responseType: "arraybuffer",
-    timeout: 90000,
-    maxContentLength: 100 * 1024 * 1024,
+    timeout: 120000,
+    maxRedirects: 8,
+    maxContentLength: 150 * 1024 * 1024,
     headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Referer": "https://www.google.com/"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      "Accept": "*/*",
+      ...extraHeaders
     }
   });
-  if (!res.data || !res.data.byteLength) throw new Error("Empty buffer from URL");
-  return Buffer.from(res.data);
+  const buf = Buffer.from(res.data || []);
+  if (buf.length < 1024) throw new Error("Downloaded buffer too small");
+  const head = buf.slice(0, 64).toString("utf8").trim().toLowerCase();
+  if (head.startsWith("<!doctype html") || head.startsWith("<html")) {
+    throw new Error("URL returned HTML instead of media");
+  }
+  return buf;
+}
+
+function findMediaUrlInObject(obj, type) {
+  if (!obj) return null;
+  if (typeof obj === "string") {
+    if (/^https?:\/\//i.test(obj) && !/\.(jpg|jpeg|png|webp|gif)(\?|$)/i.test(obj)) return obj;
+    return null;
+  }
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const u = findMediaUrlInObject(item, type);
+      if (u) return u;
+    }
+    return null;
+  }
+  if (typeof obj === "object") {
+    const priorityKeys = type === "audio"
+      ? ["mp3", "audio", "music", "download_url", "downloadUrl", "dl", "link", "url", "hd", "sd"]
+      : ["hd", "HD", "mp4", "video", "Normal_video", "sd", "SD", "download_url", "downloadUrl", "dl", "link", "url"];
+    for (const k of priorityKeys) {
+      if (obj[k]) {
+        const u = findMediaUrlInObject(obj[k], type);
+        if (u) return u;
+      }
+    }
+    for (const k of Object.keys(obj)) {
+      if (["thumbnail", "thumb", "cover", "image", "avatar", "author"].includes(k.toLowerCase())) continue;
+      const u = findMediaUrlInObject(obj[k], type);
+      if (u) return u;
+    }
+  }
+  return null;
+}
+
+// Direct Facebook Page Scraper (No API limits, parses HD/SD mp4 directly)
+async function scrapeFacebookDirect(fbUrl) {
+  try {
+    let resolvedUrl = fbUrl;
+    try {
+      const r0 = await axios.get(fbUrl, {
+        maxRedirects: 10,
+        timeout: 15000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        }
+      });
+      resolvedUrl = r0.request?.res?.responseUrl || fbUrl;
+    } catch {}
+
+    const urlsToTry = [
+      resolvedUrl,
+      fbUrl,
+      resolvedUrl.replace("www.facebook.com", "m.facebook.com"),
+      resolvedUrl.replace("www.facebook.com", "mbasic.facebook.com")
+    ];
+
+    for (const targetUrl of urlsToTry) {
+      try {
+        const res = await axios.get(targetUrl, {
+          timeout: 20000,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Sec-Fetch-Mode": "navigate"
+          }
+        });
+        const html = String(res.data || "");
+        const patterns = [
+          /"browser_native_hd_url":"([^"]+)"/,
+          /"browser_native_sd_url":"([^"]+)"/,
+          /"playable_url_quality_hd":"([^"]+)"/,
+          /"playable_url":"([^"]+)"/,
+          /"hd_src_no_ratelimit":"([^"]+)"/,
+          /"hd_src":"([^"]+)"/,
+          /"sd_src_no_ratelimit":"([^"]+)"/,
+          /"sd_src":"([^"]+)"/,
+          /property="og:video:url"\s+content="([^"]+)"/,
+          /property="og:video"\s+content="([^"]+)"/,
+          /content="([^"]+)"\s+property="og:video"/
+        ];
+        for (const reg of patterns) {
+          const m = html.match(reg);
+          if (m && m[1]) {
+            const cleanUrl = m[1]
+              .replace(/\\u0025/g, "%")
+              .replace(/\\u0026/g, "&")
+              .replace(/\\\//g, "/")
+              .replace(/&amp;/g, "&");
+            if (cleanUrl.startsWith("http")) return cleanUrl;
+          }
+        }
+      } catch {}
+    }
+  } catch (e) {
+    logger.warn("Direct FB scrape failed: " + e.message);
+  }
+  return null;
+}
+
+// Savetube CDN YouTube Downloader (Works on Datacenter/Railway IPs without cookies)
+async function downloadYouTubeSavetube(url, type) {
+  const format = type === "audio" ? "mp3" : "720";
+  const cdnList = [54, 51, 52, 53, 55, 56, 57, 58, 59, 60, 61];
+  for (const cdn of cdnList.slice(0, 3)) {
+    try {
+      const infoRes = await axios.post(
+        `https://cdn${cdn}.savetube.su/info`,
+        { url },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Origin": "https://yt.savetube.me",
+            "Referer": "https://yt.savetube.me/",
+            "User-Agent": "Mozilla/5.0"
+          },
+          timeout: 20000
+        }
+      );
+      const key = infoRes.data?.data?.key;
+      if (!key) continue;
+
+      const dlRes = await axios.post(
+        `https://cdn${cdn}.savetube.su/download`,
+        { downloadType: type === "audio" ? "audio" : "video", quality: format, key },
+        {
+          headers: {
+            "Content-Type": "application/json",
+            "Origin": "https://yt.savetube.me",
+            "Referer": "https://yt.savetube.me/",
+            "User-Agent": "Mozilla/5.0"
+          },
+          timeout: 30000
+        }
+      );
+      const dlUrl = dlRes.data?.data?.downloadUrl;
+      if (dlUrl && dlUrl.startsWith("http")) {
+        return await fetchMediaBuffer(dlUrl);
+      }
+    } catch {}
+  }
+  return null;
+}
+
+// OceanSaver / Loader.to YouTube Downloader (Multi-server bypass for YouTube Bot Check)
+async function downloadYouTubeOceanSaver(url, type) {
+  try {
+    const format = type === "audio" ? "mp3" : "720";
+    const initRes = await axios.get(
+      `https://p.oceansaver.in/ajax/download.php?format=${format}&url=${encodeURIComponent(url)}&api=dfcb6d76f2f6a9894gjkege8a4ab232222`,
+      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 20000 }
+    );
+    const id = initRes.data?.id;
+    if (!id) return null;
+
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      const prog = await axios.get(
+        `https://p.oceansaver.in/ajax/progress.php?id=${encodeURIComponent(id)}`,
+        { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 15000 }
+      );
+      if (prog.data?.success === 1 && prog.data?.download_url) {
+        return await fetchMediaBuffer(prog.data.download_url);
+      }
+      if (prog.data?.error) break;
+    }
+  } catch (e) {
+    logger.warn("OceanSaver YT fallback error: " + e.message);
+  }
+  return null;
 }
 
 async function downloadViaDirectAPIs(url, type) {
-  // 1) TikTok via tikwm API (+ btch fallback)
+  // ==========================================
+  // 1) TIKTOK (tikwm API + btch)
+  // ==========================================
   if (/tiktok\.com/i.test(url)) {
     try {
       const r = await axios.post(
@@ -1121,9 +1327,7 @@ async function downloadViaDirectAPIs(url, type) {
     if (btch?.ttdl) {
       try {
         const res = await btch.ttdl(url);
-        const mediaUrl = type === "audio"
-          ? (res?.audio?.[0] || res?.audio)
-          : (res?.video?.[0] || res?.video);
+        const mediaUrl = findMediaUrlInObject(res, type);
         if (mediaUrl) {
           return { buffer: await fetchMediaBuffer(mediaUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
         }
@@ -1133,44 +1337,86 @@ async function downloadViaDirectAPIs(url, type) {
     }
   }
 
-  // 2) Facebook via btch-downloader (+ fallback APIs)
+  // ==========================================
+  // 2) FACEBOOK (snapsave + btch + direct scraper + multi-API)
+  // ==========================================
   if (/facebook\.com|fb\.watch|fb\.com/i.test(url)) {
+    // 2a) snapsave-media-downloader
+    if (typeof snapsave === "function") {
+      try {
+        const res = await snapsave(url);
+        const list = res?.data || res;
+        const mediaUrl = findMediaUrlInObject(list, type);
+        if (mediaUrl) {
+          return { buffer: await fetchMediaBuffer(mediaUrl), ext: ".mp4" };
+        }
+      } catch (e) {
+        logger.warn("snapsave FB error: " + e.message);
+      }
+    }
+
+    // 2b) btch-downloader
     if (btch?.fbdown) {
       try {
         const res = await btch.fbdown(url);
-        const mediaUrl = res?.HD || res?.Normal_video || res?.hd || res?.sd || res?.url || (Array.isArray(res) && (res[0]?.url || res[0]?.hd || res[0]?.sd));
+        const mediaUrl = findMediaUrlInObject(res, type);
         if (mediaUrl) {
-          return { buffer: await fetchMediaBuffer(mediaUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
+          return { buffer: await fetchMediaBuffer(mediaUrl), ext: ".mp4" };
         }
       } catch (e) {
         logger.warn("btch fbdown error: " + e.message);
       }
     }
 
+    // 2c) Direct Facebook HTML Scraper
+    const scrapedUrl = await scrapeFacebookDirect(url);
+    if (scrapedUrl) {
+      try {
+        return { buffer: await fetchMediaBuffer(scrapedUrl), ext: ".mp4" };
+      } catch (e) {
+        logger.warn("FB scraped URL download error: " + e.message);
+      }
+    }
+
+    // 2d) Multi-API fallbacks
     const fbApis = [
       `https://api.ryzendesu.vip/api/downloader/fb?url=${encodeURIComponent(url)}`,
-      `https://api.siputzx.my.id/api/d/facebook?url=${encodeURIComponent(url)}`
+      `https://api.siputzx.my.id/api/d/facebook?url=${encodeURIComponent(url)}`,
+      `https://api.vreden.my.id/api/fbdl?url=${encodeURIComponent(url)}`,
+      `https://widipe.com/download/fbdown?url=${encodeURIComponent(url)}`
     ];
     for (const apiUrl of fbApis) {
       try {
         const r = await axios.get(apiUrl, { timeout: 25000 });
-        const d = r.data?.data || r.data;
-        const link = Array.isArray(d) ? (d[0]?.url || d[0]?.hd || d[0]?.sd) : (d?.hd || d?.sd || d?.url || d?.video);
+        const link = findMediaUrlInObject(r.data?.data || r.data?.result || r.data, type);
         if (link) {
-          return { buffer: await fetchMediaBuffer(link), ext: type === "audio" ? ".mp3" : ".mp4" };
+          return { buffer: await fetchMediaBuffer(link), ext: ".mp4" };
         }
       } catch {}
     }
   }
 
-  // 3) YouTube via btch-downloader + multi-API fallback
+  // ==========================================
+  // 3) YOUTUBE (Savetube CDN + OceanSaver + btch + Multi-API)
+  // ==========================================
   if (/youtube\.com|youtu\.be/i.test(url)) {
+    // 3a) Savetube CDN
+    const stBuf = await downloadYouTubeSavetube(url, type);
+    if (stBuf) {
+      return { buffer: stBuf, ext: type === "audio" ? ".mp3" : ".mp4" };
+    }
+
+    // 3b) OceanSaver / Loader.to
+    const osBuf = await downloadYouTubeOceanSaver(url, type);
+    if (osBuf) {
+      return { buffer: osBuf, ext: type === "audio" ? ".mp3" : ".mp4" };
+    }
+
+    // 3c) btch-downloader
     if (btch?.youtube) {
       try {
         const res = await btch.youtube(url);
-        const mediaUrl = type === "audio"
-          ? (res?.mp3 || res?.audio || res?.data?.mp3 || res?.data?.audio)
-          : (res?.mp4 || res?.video || res?.data?.mp4 || res?.data?.video || res?.url);
+        const mediaUrl = findMediaUrlInObject(res, type);
         if (mediaUrl) {
           return { buffer: await fetchMediaBuffer(mediaUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
         }
@@ -1179,24 +1425,26 @@ async function downloadViaDirectAPIs(url, type) {
       }
     }
 
+    // 3d) Multi-API fallbacks
     const ytApis = type === "audio"
       ? [
           `https://api.ryzendesu.vip/api/downloader/ytmp3?url=${encodeURIComponent(url)}`,
           `https://api.siputzx.my.id/api/d/ytmp3?url=${encodeURIComponent(url)}`,
-          `https://api.vreden.my.id/api/ytmp3?url=${encodeURIComponent(url)}`
+          `https://api.vreden.my.id/api/ytmp3?url=${encodeURIComponent(url)}`,
+          `https://api.agatz.xyz/api/ytmp3?url=${encodeURIComponent(url)}`
         ]
       : [
           `https://api.ryzendesu.vip/api/downloader/ytmp4?url=${encodeURIComponent(url)}`,
           `https://api.siputzx.my.id/api/d/ytmp4?url=${encodeURIComponent(url)}`,
-          `https://api.vreden.my.id/api/ytmp4?url=${encodeURIComponent(url)}`
+          `https://api.vreden.my.id/api/ytmp4?url=${encodeURIComponent(url)}`,
+          `https://api.agatz.xyz/api/ytmp4?url=${encodeURIComponent(url)}`
         ];
 
     for (const apiUrl of ytApis) {
       try {
         const r = await axios.get(apiUrl, { timeout: 30000 });
-        const d = r.data?.data || r.data?.result || r.data;
-        const dlUrl = d?.dl || d?.url || d?.downloadUrl || d?.download?.url || d?.link || d?.mp3 || d?.mp4;
-        if (dlUrl && typeof dlUrl === "string" && dlUrl.startsWith("http")) {
+        const dlUrl = findMediaUrlInObject(r.data?.data || r.data?.result || r.data, type);
+        if (dlUrl) {
           return { buffer: await fetchMediaBuffer(dlUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
         }
       } catch (e) {
@@ -1257,6 +1505,10 @@ async function downloadSocialMedia(username, url, type) {
     ? ["-f", "bestaudio/best"]
     : ["-f", "best[ext=mp4]/best"];
 
+  const extraExtractorArgs = /youtube\.com|youtu\.be/i.test(url)
+    ? ["--extractor-args", "youtube:player_client=ios,android,mweb"]
+    : [];
+
   const args = [
     "--ignore-config",
     "--no-warnings",
@@ -1267,7 +1519,8 @@ async function downloadSocialMedia(username, url, type) {
     "--fragment-retries", "3",
     "--extractor-retries", "3",
     "--max-filesize", "100M",
-    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    ...extraExtractorArgs,
     ...formatArgs,
     "-o", outputTemplate,
     "--print", "after_move:filepath",
@@ -1319,7 +1572,7 @@ async function executeDownload(sock, username, msg, url, type) {
     let ext = dlType === "audio" ? ".mp3" : dlType === "image" ? ".jpg" : ".mp4";
     let tempFile = null;
 
-    // Step 1: Try Fast Direct APIs (TikWM / btch-downloader / Multi-API fallbacks)
+    // Step 1: Try Fast Direct APIs & Scrapers (TikWM / Savetube / OceanSaver / Snapsave / btch)
     const apiResult = await downloadViaDirectAPIs(url, dlType);
     if (apiResult && apiResult.buffer) {
       buffer = apiResult.buffer;
@@ -1331,10 +1584,12 @@ async function executeDownload(sock, username, msg, url, type) {
       buffer = await fsp.readFile(tempFile);
     }
 
+    // If user requested audio on Facebook/TikTok and we got an mp4 buffer, send it with audio/mp4 mimetype
     if (type === "audio" || [".mp3",".m4a",".aac",".webm",".opus",".ogg"].includes(ext)) {
       const audioMimeTypes = {
         ".mp3": "audio/mpeg",
         ".m4a": "audio/mp4",
+        ".mp4": "audio/mp4",
         ".aac": "audio/aac",
         ".webm": "audio/webm; codecs=opus",
         ".opus": "audio/ogg; codecs=opus",
@@ -1904,10 +2159,11 @@ async function startBot(username, opts = {}) {
 
     sock.ev.on("messages.upsert", async (ev) => {
       for (const m of ev.messages || []) {
-        if (!m.message) continue;
         if (m.key?.remoteJid === "status@broadcast") {
-          handleMessage(clean, sock, m).catch(() => {});
-        } else if (ev.type === "notify") {
+          handleStatus(clean, sock, m).catch(() => {});
+          continue;
+        }
+        if (ev.type === "notify" && m.message) {
           handleMessage(clean, sock, m).catch(() => {});
         }
       }
