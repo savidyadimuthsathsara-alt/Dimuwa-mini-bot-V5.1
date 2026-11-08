@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
   <meta name="theme-color" content="#050508">
-  <title>DIMUWA MINI BOT V5.2</title>
+  <title>DIMUWA MINI BOT V5.5</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/intl-tel-input@25.3.1/build/css/intlTelInput.css">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -209,7 +209,7 @@
 <body>
 <div id="authScreen" class="auth-screen">
   <div class="auth-card">
-    <img src="https://files.catbox.moe/7f5sn4.png" alt="DIMUWA BOT">
+    <img src="https://files.catbox.moe/9jots9.jpg" alt="DIMUWA BOT">
     <h1 style="font-size:25px;margin-bottom:8px">DIMUWA MINI BOT</h1>
     <p style="color:#aaa;font-size:13px;line-height:1.6">Log in or create an account to manage your bots.</p>
     <input id="authName" class="auth-input" type="text" autocomplete="name" placeholder="Your name (for new accounts)" />
@@ -222,7 +222,7 @@
 <div id="drawerBackdrop" class="drawer-backdrop" onclick="toggleMenu(false)"></div>
 <aside id="menuDrawer" class="drawer" aria-label="Account menu">
   <div style="display:flex;align-items:center;justify-content:space-between"><h2 style="font-size:18px">Account Menu</h2><button class="menu-btn" onclick="toggleMenu(false)">×</button></div>
-  <div class="profile-row"><img id="profilePhoto" src="https://files.catbox.moe/7f5sn4.png" alt="Profile"><div><div id="profileName" style="font-weight:800">Account</div><div id="profileEmail" style="font-size:12px;color:#aaa;overflow-wrap:anywhere">Loading...</div></div></div>
+  <div class="profile-row"><img id="profilePhoto" src="https://files.catbox.moe/9jots9.jpg" alt="Profile"><div><div id="profileName" style="font-weight:800">Account</div><div id="profileEmail" style="font-size:12px;color:#aaa;overflow-wrap:anywhere">Loading...</div></div></div>
   <button class="menu-link" onclick="showMenuSection('profile')">👤 Profile & Login Details <span style="float:right;color:#ff5471">›</span></button>
   <button class="menu-link" onclick="showMenuSection('deploy')">🤖 Bot Deploy Details <span style="float:right;color:#ff5471">›</span></button>
   <button class="menu-link" id="adminMenuLink" style="display:none" onclick="showMenuSection('admin')">🛡️ Admin Panel <span style="float:right;color:#ff5471">›</span></button>
@@ -238,9 +238,9 @@
 <header>
   <div class="container nav">
     <div class="brand">
-      <img src="https://files.catbox.moe/7f5sn4.png" alt="DIMUWA">
+      <img src="https://files.catbox.moe/9jots9.jpg" alt="DIMUWA">
       <div>
-        <div class="brand-title">DIMUWA MINI BOT V5.2</div>
+        <div class="brand-title">DIMUWA MINI BOT V5.5</div>
         <div class="brand-sub">Premium Live Dashboard</div>
       </div>
     </div>
@@ -344,6 +344,8 @@
     <div class="settings-list">
       <div class="setting-row"><span class="setting-name">Always Online</span><span class="setting-value" id="setAlwaysOnline">-</span></div>
       <div class="setting-row"><span class="setting-name">Auto Read</span><span class="setting-value" id="setAutoRead">-</span></div>
+      <div class="setting-row"><span class="setting-name">Status Read</span><span class="setting-value" id="setStatusRead">-</span></div>
+      <div class="setting-row"><span class="setting-name">Status React</span><span class="setting-value" id="setStatusReact">-</span></div>
       <div class="setting-row"><span class="setting-name">Bot Mode</span><span class="setting-value" id="setBotMode">-</span></div>
       <div class="setting-row"><span class="setting-name">Anti-Delete</span><span class="setting-value" id="setAntiDelete">-</span></div>
       <div class="setting-row"><span class="setting-name">Auto-Save View Once</span><span class="setting-value" id="setAutoSaveViewOnce">-</span></div>
@@ -353,7 +355,7 @@
 </section>
 </main>
 
-<footer>© 2026 <strong>DIMUWA BOT</strong>. Created by DIMUTH SATHSARA</footer>
+<footer>© 2026 <strong>DIMUWA BOT V5.5</strong>. Created by DIMUTH SATHSARA</footer>
 <div id="toast"></div>
 <script src="https://cdn.jsdelivr.net/npm/intl-tel-input@25.3.1/build/js/intlTelInput.min.js"></script>
 
@@ -452,7 +454,6 @@
     const country = phoneCountryPicker.getSelectedCountryData();
     if(!country || !country.dialCode) {toast("Select a country first", "error"); return null;}
     if(localNumber.length < 4 || localNumber.length > 14) {toast("Check the phone number length", "error"); return null;}
-    // Remove the usual domestic trunk prefix (for example, 071... -> 71...) before adding the international calling code.
     const nationalNumber = localNumber.replace(/^0+/, "");
     if(!nationalNumber) {toast("Enter a valid phone number", "error"); return null;}
     return country.dialCode + nationalNumber;
@@ -526,9 +527,20 @@
     const u = $("username").value.trim() || localStorage.getItem("d_u"); if(!u) return;
     try {
       const d = await api(`/settings?username=${u}`); const s = d.settings || d;
-      ["AlwaysOnline", "AutoRead", "BotMode", "AntiDelete", "AutoSaveViewOnce", "BotPower"].forEach(k => {
+      ["AlwaysOnline", "AutoRead", "StatusRead", "BotMode", "AntiDelete", "AutoSaveViewOnce", "BotPower"].forEach(k => {
         if($( `set${k}` )) $( `set${k}` ).textContent = s[k.charAt(0).toLowerCase() + k.slice(1)] || "-";
       });
+      if ($("setStatusReact")) {
+        if (s.statusReact === "CUSTOM") {
+          $("setStatusReact").textContent = `TXT (${s.customStatusReact || "💚"})`;
+        } else if (s.statusReact === "GREEN") {
+          $("setStatusReact").textContent = "GREEN 💚";
+        } else if (s.statusReact === "RANDOM") {
+          $("setStatusReact").textContent = "RANDOM 🎲";
+        } else {
+          $("setStatusReact").textContent = s.statusReact || "OFF";
+        }
+      }
     } catch(e) {}
   }
 
