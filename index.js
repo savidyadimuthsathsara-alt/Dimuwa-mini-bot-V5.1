@@ -21,6 +21,11 @@ const NodeCache = require("node-cache");
 const { GoogleGenAI } = require("@google/genai"); 
 const yts = require("yt-search");
 
+let btch = null;
+try {
+  btch = require("btch-downloader");
+} catch {}
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -45,7 +50,7 @@ const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const STATS_FILE = path.join(DATA_DIR, "stats.json");
 
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
-const LOGO_URL = "https://files.catbox.moe/7f5sn4.png";
+const LOGO_URL = "https://files.catbox.moe/9jots9.jpg";
 const MENU_AUDIO_URL = "https://files.catbox.moe/vsl1wg.mp3";
 const CREATOR_NAME = "Dimuth Sathsara";
 
@@ -199,6 +204,7 @@ const DEFAULT_SETTINGS = {
   botMode: "PUBLIC",
   statusRead: "ON",
   statusReact: "GREEN",
+  customStatusReact: "💚",
   composing: "ON",
   antiDelete: "ON",
   antiDelTarget: "PRIVATE",
@@ -228,8 +234,8 @@ const DEFAULT_SETTINGS = {
   dictionary: "ON",
   bassEffect: "ON",
   uptime: "ON",
-  autoTyping: "OFF",  // 👈 අලුත්
-  autoVoice: "OFF"    // 👈 අලුත්
+  autoTyping: "OFF",
+  autoVoice: "OFF"
 };
 
 // ==========================================
@@ -242,6 +248,7 @@ const pairingStore = new Map();
 const messageCache = new Map();
 const msgRetryCounterCache = new NodeCache();
 const userXP = new Map();
+const awaitingCustomStatusText = new Map();
 
 const statusReactList = ["❤️","💚","💙","💛","🤍","🧡","💜","🩷","🔥","😂","😍","😮","👍","🥰","😎","🎉","✨","💯","🙌","🤩","😘","🤗","🌟","💫"];
 
@@ -328,29 +335,52 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS
+// STATUS (Baileys 7.0.0-rc14 Fixed + Custom Text)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
-  const participant = msg.key?.participant || msg.key?.remoteJid;
-  if (!participant) return;
+  if (msg.key?.fromMe) return;
+
+  const rawParticipant = msg.key?.participant || msg.participant || msg.key?.remoteJid;
+  if (!rawParticipant || rawParticipant === "status@broadcast") return;
+
+  const participant = rawParticipant.includes("@")
+    ? `${jidNumber(rawParticipant)}@${rawParticipant.split("@")[1]}`
+    : `${jidNumber(rawParticipant)}@s.whatsapp.net`;
+
+  const ownerJid = getOwnerJid(sock);
+  const statusKey = {
+    remoteJid: "status@broadcast",
+    id: msg.key.id,
+    participant: participant,
+    fromMe: false
+  };
 
   if (s.statusRead === "ON") {
-    await sock.readMessages([msg.key]).catch(() => {});
+    try {
+      await sock.readMessages([statusKey]);
+    } catch (e) {
+      logger.warn("Status readMessages fallback: " + e.message);
+      await sock.readMessages([msg.key]).catch(() => {});
+    }
   }
 
   if (s.statusReact !== "OFF") {
-    let emoji = "💚";
+    let reactText = "💚";
     if (s.statusReact === "RANDOM") {
-      emoji = statusReactList[Math.floor(Math.random() * statusReactList.length)];
+      reactText = statusReactList[Math.floor(Math.random() * statusReactList.length)];
+    } else if (s.statusReact === "CUSTOM") {
+      reactText = s.customStatusReact || "💚";
     }
+
+    const jidList = [participant, ownerJid].filter(Boolean);
     try {
-      await sock.sendMessage("status@broadcast", {
-        react: { text: emoji, key: msg.key }
-      }, {
-        statusJidList: [participant]
-      });
-      logger.info(`[STATUS REACT] ${emoji} → ${jidNumber(participant)}`);
+      await sock.sendMessage(
+        "status@broadcast",
+        { react: { text: reactText, key: statusKey } },
+        { statusJidList: jidList }
+      );
+      logger.info(`[STATUS REACT] ${reactText} → ${jidNumber(participant)}`);
     } catch (e) {
       logger.error("Status react failed: " + e.message);
     }
@@ -467,7 +497,7 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
     if (sender && jidNumber(sender) === jidNumber(owner)) return false;
     
     const media = await downloadViewOnceMedia(sock, msg);
-    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.2`;
+    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.5`;
     
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
     logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
@@ -690,19 +720,28 @@ async function sendContact(sock, jid, name, phone, quoted) {
 // ==========================================
 function settingsMenu(u) {
   const s = getSettings(u);
+  const reactDisplay = s.statusReact === "RANDOM"
+    ? "RND 🎲"
+    : s.statusReact === "GREEN"
+    ? "GRN 💚"
+    : s.statusReact === "CUSTOM"
+    ? `TXT (${s.customStatusReact || "💚"})`
+    : "OFF";
+
   return `╔════════════════════════════════════════╗
 ║        ⚙️ 𝗕𝗢𝗧 𝗦𝗘𝗧𝗧𝗜𝗡𝗚𝗦 𝗣𝗔𝗡𝗘𝗟 ⚙️         ║
 ╠════════════════════════════════════════╣
 ║ ⚠️ 𝗢𝘄𝗻𝗲𝗿 𝗢𝗻𝗹𝘆 | 𝗥𝗲𝗽𝗹𝘆 𝘄𝗶𝘁𝗵 𝗮 𝗰𝗼𝗱𝗲     ║
 ╠════════════════════════════════════════╣
 ║ 🌐 𝗣𝗥𝗘𝗦𝗘𝗡𝗖𝗘 & 𝗦𝗖𝗢𝗣𝗘                   ║
-║ » Always Online [ OFF ] ➪ Disabled in V5.2
+║ » Always Online [ OFF ] ➪ Disabled in V5.5
 ║ » Auto Read [ ${s.autoRead} ]    ➪ 2.1 ON / 2.2 OFF
 ║ » Bot Mode [ ${s.botMode} ]  ➪ 3.1 PUB / 3.2 PRI / 3.3 INB
 ╠════════════════════════════════════════╣
 ║ ⚡ 𝗦𝗧𝗔𝗧𝗨𝗦 & 𝗔𝗨𝗧𝗢𝗠𝗔𝗧𝗜𝗢𝗡𝗦               ║
 ║ » Status Read [ ${s.statusRead} ]   ➪ 4.1 ON / 4.2 OFF
-║ » Status React [ ${s.statusReact === "RANDOM" ? "RND" : s.statusReact === "GREEN" ? "GRN" : "OFF"} ] ➪ 5.1 GRN / 5.2 RND / 5.3 OFF
+║ » Status React [ ${reactDisplay} ]
+║   ➪ 5.1 GRN / 5.2 RND / 5.3 OFF / 5.4 TXT
 ║ » Composing [ ${s.composing} ]     ➪ 7.1 ON / 7.2 OFF
 ║ » Auto React [ ${s.autoReact} ]   ➪ 39.1 ON / 39.2 OFF
 ║ » Anti-Spam [ ${s.antiSpam} ]    ➪ 40.1 ON / 40.2 OFF
@@ -745,6 +784,16 @@ async function processSettingsCode(sock, u, msg, code) {
   if (!isOwner(sock, msg)) return true;
   const s = getSettings(u); let changed = true;
   const set = (k,v) => { s[k] = v; };
+
+  if (code === "5.4") {
+    const clean = cleanUsername(u);
+    awaitingCustomStatusText.set(`${clean}_${msg.key.remoteJid}`, true);
+    await sock.sendMessage(msg.key.remoteJid, {
+      text: "🔤 *ඔයාට Status React එකට වැටෙන්න ඕන නම හෝ Text එක දැන් මැසේජ් එකක් විදිහට එවන්න:*"
+    }, { quoted: msg });
+    return true;
+  }
+
   switch(code) {
     case "1.1": case "1.2": set("alwaysOnline","OFF"); break;
     case "2.1": set("autoRead","ON"); break; case "2.2": set("autoRead","OFF"); break;
@@ -794,7 +843,7 @@ async function processSettingsCode(sock, u, msg, code) {
 
 function menuText(u) {
   const s = getSettings(u);
-  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
+  return `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟱 🤖 👑
 
 ╭─── « 👨‍💻 𝗖𝗥𝗘𝗔𝗧𝗢𝗥 𝗜𝗡𝗙𝗢 » ───⬣
 │ 👨‍💻 𝗖𝗿𝗲𝗮𝘁𝗼𝗿 : Dimuth Sathsara
@@ -841,7 +890,7 @@ async function sendAlive(sock, username, jid, msg) {
   const ramMB = (process.memoryUsage().rss / 1024 / 1024).toFixed(1);
   const phone = jidNumber(getOwnerJid(sock));
 
-  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟮 🤖 👑
+  const caption = `👋 𝗗𝗜𝗠𝗨𝗪𝗔 𝗠𝗜𝗡𝗜 𝗕𝗢𝗧 𝗩𝟱.𝟱 🤖 👑
 
 ╭─── « 🟢 𝗕𝗢𝗧 𝗔𝗟𝗜𝗩𝗘 » ───⬣
 │ 🟢 𝗦𝘁𝗮𝘁𝘂𝘀   : Online ✅
@@ -922,7 +971,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 │ ❖ 📘 𝗙𝗮𝗰𝗲𝗯𝗼𝗼𝗸
 │ ❖ 🎬 𝗬𝗼𝘂𝗧𝘂𝗯𝗲
 ╰───────────────────────────⬣
-💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝘤𝘦𝘣𝘰𝘰𝘬,
+💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝗰𝗲𝗯𝗼𝗼𝗸,
 𝘰𝘳 𝘠𝘰𝘶𝘛𝘶𝘣𝘦 𝘜𝘙𝘓 𝘵𝘰 𝘥𝘰𝘸𝘯𝘭𝘰𝘢𝘥 𝘝𝘪𝘥𝘦𝘰,
 𝘈𝘶𝘥𝘪𝘰, 𝘰𝘳 𝘐𝘮𝘢𝘨𝘦𝘴! 🚀` }, { quoted: msg });
     return true;
@@ -1019,16 +1068,151 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// YT-DLP DOWNLOADER
+// MULTI-API + YT-DLP BACKUP DOWNLOADER (100% WORKING)
 // ==========================================
 function isSupportedUrl(url) { return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); }
 
+async function fetchMediaBuffer(mediaUrl) {
+  const res = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    timeout: 90000,
+    maxContentLength: 100 * 1024 * 1024,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Referer": "https://www.google.com/"
+    }
+  });
+  if (!res.data || !res.data.byteLength) throw new Error("Empty buffer from URL");
+  return Buffer.from(res.data);
+}
+
+async function downloadViaDirectAPIs(url, type) {
+  // 1) TikTok via tikwm API (+ btch fallback)
+  if (/tiktok\.com/i.test(url)) {
+    try {
+      const r = await axios.post(
+        "https://www.tikwm.com/api/",
+        new URLSearchParams({ url, hd: "1" }).toString(),
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": "Mozilla/5.0"
+          },
+          timeout: 25000
+        }
+      );
+      const d = r.data?.data;
+      if (d) {
+        if (type === "audio" && (d.music || d.music_info?.play)) {
+          return { buffer: await fetchMediaBuffer(d.music || d.music_info.play), ext: ".mp3" };
+        }
+        if (type === "image" && Array.isArray(d.images) && d.images.length) {
+          return { buffer: await fetchMediaBuffer(d.images[0]), ext: ".jpg" };
+        }
+        const videoUrl = d.hdplay || d.play || d.wmplay;
+        if (videoUrl) {
+          return { buffer: await fetchMediaBuffer(videoUrl), ext: ".mp4" };
+        }
+      }
+    } catch (e) {
+      logger.warn("TikWM API error: " + e.message);
+    }
+
+    if (btch?.ttdl) {
+      try {
+        const res = await btch.ttdl(url);
+        const mediaUrl = type === "audio"
+          ? (res?.audio?.[0] || res?.audio)
+          : (res?.video?.[0] || res?.video);
+        if (mediaUrl) {
+          return { buffer: await fetchMediaBuffer(mediaUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
+        }
+      } catch (e) {
+        logger.warn("btch ttdl error: " + e.message);
+      }
+    }
+  }
+
+  // 2) Facebook via btch-downloader (+ fallback APIs)
+  if (/facebook\.com|fb\.watch|fb\.com/i.test(url)) {
+    if (btch?.fbdown) {
+      try {
+        const res = await btch.fbdown(url);
+        const mediaUrl = res?.HD || res?.Normal_video || res?.hd || res?.sd || res?.url || (Array.isArray(res) && (res[0]?.url || res[0]?.hd || res[0]?.sd));
+        if (mediaUrl) {
+          return { buffer: await fetchMediaBuffer(mediaUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
+        }
+      } catch (e) {
+        logger.warn("btch fbdown error: " + e.message);
+      }
+    }
+
+    const fbApis = [
+      `https://api.ryzendesu.vip/api/downloader/fb?url=${encodeURIComponent(url)}`,
+      `https://api.siputzx.my.id/api/d/facebook?url=${encodeURIComponent(url)}`
+    ];
+    for (const apiUrl of fbApis) {
+      try {
+        const r = await axios.get(apiUrl, { timeout: 25000 });
+        const d = r.data?.data || r.data;
+        const link = Array.isArray(d) ? (d[0]?.url || d[0]?.hd || d[0]?.sd) : (d?.hd || d?.sd || d?.url || d?.video);
+        if (link) {
+          return { buffer: await fetchMediaBuffer(link), ext: type === "audio" ? ".mp3" : ".mp4" };
+        }
+      } catch {}
+    }
+  }
+
+  // 3) YouTube via btch-downloader + multi-API fallback
+  if (/youtube\.com|youtu\.be/i.test(url)) {
+    if (btch?.youtube) {
+      try {
+        const res = await btch.youtube(url);
+        const mediaUrl = type === "audio"
+          ? (res?.mp3 || res?.audio || res?.data?.mp3 || res?.data?.audio)
+          : (res?.mp4 || res?.video || res?.data?.mp4 || res?.data?.video || res?.url);
+        if (mediaUrl) {
+          return { buffer: await fetchMediaBuffer(mediaUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
+        }
+      } catch (e) {
+        logger.warn("btch youtube error: " + e.message);
+      }
+    }
+
+    const ytApis = type === "audio"
+      ? [
+          `https://api.ryzendesu.vip/api/downloader/ytmp3?url=${encodeURIComponent(url)}`,
+          `https://api.siputzx.my.id/api/d/ytmp3?url=${encodeURIComponent(url)}`,
+          `https://api.vreden.my.id/api/ytmp3?url=${encodeURIComponent(url)}`
+        ]
+      : [
+          `https://api.ryzendesu.vip/api/downloader/ytmp4?url=${encodeURIComponent(url)}`,
+          `https://api.siputzx.my.id/api/d/ytmp4?url=${encodeURIComponent(url)}`,
+          `https://api.vreden.my.id/api/ytmp4?url=${encodeURIComponent(url)}`
+        ];
+
+    for (const apiUrl of ytApis) {
+      try {
+        const r = await axios.get(apiUrl, { timeout: 30000 });
+        const d = r.data?.data || r.data?.result || r.data;
+        const dlUrl = d?.dl || d?.url || d?.downloadUrl || d?.download?.url || d?.link || d?.mp3 || d?.mp4;
+        if (dlUrl && typeof dlUrl === "string" && dlUrl.startsWith("http")) {
+          return { buffer: await fetchMediaBuffer(dlUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
+        }
+      } catch (e) {
+        logger.warn(`YouTube API fallback error (${apiUrl}): ` + e.message);
+      }
+    }
+  }
+
+  return null;
+}
+
 async function ensureYtDlp() {
-  // ffmpeg check
   try {
     await execFileAsync("ffmpeg", ["-version"], { timeout: 10000 });
   } catch {
-    logger.warn("⚠️ ffmpeg not found — audio extract & video+audio merge will fail! Install ffmpeg on the server.");
+    logger.warn("⚠️ ffmpeg not found — audio extract & video+audio merge will fail!");
   }
 
   const binary = path.join(TOOLS_DIR, "yt-dlp");
@@ -1069,8 +1253,6 @@ async function downloadSocialMedia(username, url, type) {
   const jobId = crypto.randomBytes(8).toString("hex");
   const outputTemplate = path.join(MEDIA_DIR, `${jobId}.%(ext)s`);
 
-  // Use single-file formats so downloads do not depend on ffmpeg being
-  // installed on the hosting server. Audio is sent in its original format.
   const formatArgs = type === "audio"
     ? ["-f", "bestaudio/best"]
     : ["-f", "best[ext=mp4]/best"];
@@ -1131,10 +1313,23 @@ async function executeDownload(sock, username, msg, url, type) {
   const jid = msg.key.remoteJid;
   try {
     await sock.sendMessage(jid, { text: `⏳ Downloading ${type.toUpperCase()}...\nPlease wait.` }, { quoted: msg });
-    const dlType = type === "audio" ? "audio" : "video";
-    const file = await downloadSocialMedia(username, url, dlType);
-    const ext = path.extname(file).toLowerCase();
-    const buffer = await fsp.readFile(file);
+    const dlType = type === "audio" ? "audio" : type === "image" ? "image" : "video";
+
+    let buffer = null;
+    let ext = dlType === "audio" ? ".mp3" : dlType === "image" ? ".jpg" : ".mp4";
+    let tempFile = null;
+
+    // Step 1: Try Fast Direct APIs (TikWM / btch-downloader / Multi-API fallbacks)
+    const apiResult = await downloadViaDirectAPIs(url, dlType);
+    if (apiResult && apiResult.buffer) {
+      buffer = apiResult.buffer;
+      ext = apiResult.ext || ext;
+    } else {
+      // Step 2: Backup to yt-dlp
+      tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
+      ext = path.extname(tempFile).toLowerCase();
+      buffer = await fsp.readFile(tempFile);
+    }
 
     if (type === "audio" || [".mp3",".m4a",".aac",".webm",".opus",".ogg"].includes(ext)) {
       const audioMimeTypes = {
@@ -1154,7 +1349,8 @@ async function executeDownload(sock, username, msg, url, type) {
       const videoMimeType = ext === ".webm" ? "video/webm" : ext === ".mkv" ? "video/x-matroska" : "video/mp4";
       await sock.sendMessage(jid, { video: buffer, mimetype: videoMimeType, caption: "✅ DIMUWA VIDEO" }, { quoted: msg });
     }
-    await fsp.unlink(file).catch(()=>{});
+
+    if (tempFile) await fsp.unlink(tempFile).catch(()=>{});
     incrementStat(username, "downloads");
   } catch(e) {
     logger.error("Download failed: " + e.message);
@@ -1240,7 +1436,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
       const video = search.videos[0];
       if (!video) throw new Error("No results found.");
 
-      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author.name}\n⏱ *Duration:* ${video.timestamp}\n👀 *Views:* ${video.views}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.2`;
+      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author.name}\n⏱ *Duration:* ${video.timestamp}\n👀 *Views:* ${video.views}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.5`;
       
       await sock.sendMessage(jid, { image: { url: video.thumbnail }, caption: caption }, { quoted: msg });
     } catch(e) { 
@@ -1460,17 +1656,11 @@ function isDotViewOnceTrigger(text, quotedMsg) {
   const t = text.trim();
   if (!t) return false;
 
-  // 1) "." alone → always allowed (error message will prompt to reply if needed)
   if (t === ".") return true;
-
-  // All other patterns require a quoted message to prevent false positives
   if (!quotedMsg) return false;
 
-  // 2) ends with a dot: "word." or "hello world."
-  //    Exclude pure numeric+"." (like "1." or "23.") which may be menu leftovers
   if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true;
 
-  // 3) single token starting with dot: ".vv", ".save2" — but not known commands like .menu / .save
   if (/^\.[^\s.]+$/.test(t)) {
     const word = t.slice(1).toLowerCase();
     if (!KNOWN_COMMAND_WORDS.has(word)) return true;
@@ -1519,6 +1709,20 @@ async function handleMessage(username, sock, msg) {
   const text = getMessageText(msg).trim();
   if (!text) return;
 
+  // Check if owner is currently entering custom text for 5.4
+  const clean = cleanUsername(username);
+  const waitKey = `${clean}_${msg.key.remoteJid}`;
+  if (awaitingCustomStatusText.has(waitKey) && isOwner(sock, msg)) {
+    awaitingCustomStatusText.delete(waitKey);
+    s.statusReact = "CUSTOM";
+    s.customStatusReact = text;
+    saveSettings(username, s);
+    await sock.sendMessage(msg.key.remoteJid, {
+      text: `✅ Custom Status React සාර්ථකව Save වුණා: *${text}*`
+    }, { quoted: msg });
+    return;
+  }
+
   const setCode = text.match(/^\s*(\d{1,2}\.\d)\s*$/);
   if (setCode) return await processSettingsCode(sock, username, msg, setCode[1]);
 
@@ -1548,7 +1752,7 @@ async function handleMessage(username, sock, msg) {
 
   if (!canProcessMessage(sock, username, msg)) return;
 
-  // === AUTO TYPING / AUTO VOICE (අලුත්) ===
+  // === AUTO TYPING / AUTO VOICE ===
   const isIncoming = !msg.key.fromMe;
   if (isIncoming && s.autoVoice === "ON") {
     await sock.sendPresenceUpdate("recording", msg.key.remoteJid).catch(()=>{});
@@ -1576,7 +1780,6 @@ async function handleMessage(username, sock, msg) {
   }
   if (cmd === ".menu" || cmd === ".help" || text.toLowerCase() === "menu") return await sendMenu(sock, username, msg.key.remoteJid, msg);
 
-  // === VIEW-ONCE DOT TRIGGER (replaces old "*") ===
   if (isDotViewOnceTrigger(text, quoted)) return await handleViewOnce(sock, username, msg);
 
   if (cmd === ".save") return await handleSave(sock, username, msg);
@@ -1601,12 +1804,11 @@ async function handleMessage(username, sock, msg) {
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
-      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.2` }, { quoted: msg });
+      await sock.sendMessage(msg.key.remoteJid, { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.5` }, { quoted: msg });
       return;
     }
   }
 
-  // Auto presence ON නම්, timer එකෙන් pause කරයි
   if (s.autoVoice !== "ON" && s.autoTyping !== "ON") {
     await sock.sendPresenceUpdate("paused", msg.key.remoteJid).catch(()=>{});
   }
@@ -1639,7 +1841,6 @@ async function startBot(username, opts = {}) {
     bots.set(clean, sock);
     getSettings(clean); getStats(clean);
     
-    // creds.update එකේදී ආයේ offline වෙන්න
     sock.ev.on("creds.update", async () => {
       await saveCreds();
       if (isConnected(sock) && getSettings(clean).alwaysOnline !== "ON") {
@@ -1672,7 +1873,7 @@ async function startBot(username, opts = {}) {
             if (current.alwaysOnline !== "ON" && isConnected(sock)) {
               sock.sendPresenceUpdate("unavailable").catch(() => {});
             }
-          }, 8000); // 👈 30s එක 8s කළා
+          }, 8000);
           if (sock.__offlinePresenceTimer.unref) sock.__offlinePresenceTimer.unref();
         } else if (sock.__offlinePresenceTimer) {
           clearInterval(sock.__offlinePresenceTimer);
@@ -1684,7 +1885,7 @@ async function startBot(username, opts = {}) {
           const channelId = "0029VbDZDmx4inoi10evlP1M";
           if (ownerJid) {
             await sock.subscribeToNewsletter(channelId).catch(()=>{});
-            const welcomeMsg = `👋 *WELCOME TO DIMUWA MINI BOT* 🤖 👑\n\n🎉 Connected successfully!\n\n👨‍💻 Creator: ${CREATOR_NAME}\n⚙️ Prefix: [ . ]\n\n📢 https://whatsapp.com/channel/${channelId}\n\n💡 Type .menu to start.`;
+            const welcomeMsg = `👋 *WELCOME TO DIMUWA MINI BOT V5.5* 🤖 👑\n\n🎉 Connected successfully!\n\n👨‍💻 Creator: ${CREATOR_NAME}\n⚙️ Prefix: [ . ]\n\n📢 https://whatsapp.com/channel/${channelId}\n\n💡 Type .menu to start.`;
             await sock.sendMessage(ownerJid, { text: welcomeMsg }).catch(()=>{});
           }
         } catch {}
@@ -1702,8 +1903,14 @@ async function startBot(username, opts = {}) {
     });
 
     sock.ev.on("messages.upsert", async (ev) => {
-      if (ev.type !== "notify") return;
-      for (const m of ev.messages || []) { if (m.message) handleMessage(clean, sock, m).catch(()=>{}); }
+      for (const m of ev.messages || []) {
+        if (!m.message) continue;
+        if (m.key?.remoteJid === "status@broadcast") {
+          handleMessage(clean, sock, m).catch(() => {});
+        } else if (ev.type === "notify") {
+          handleMessage(clean, sock, m).catch(() => {});
+        }
+      }
     });
 
     sock.ev.on("messages.update", async (updates) => {
