@@ -23,6 +23,7 @@
 "pino": "^9.6.0",
 "qrcode": "^1.5.4",
 "session-file-store": "^1.5.0",
+"snapsave-media-downloader": "^1.0.5",
 "wa-sticker-formatter": "^4.4.2",
 "yt-search": "^2.12.1"
 }
