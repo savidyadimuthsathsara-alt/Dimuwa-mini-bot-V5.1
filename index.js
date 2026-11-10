@@ -18,7 +18,7 @@ const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 const NodeCache = require("node-cache");
-const { GoogleGenAI } = require("@google/genai"); 
+const { GoogleGenAI } = require("@google/genai");
 const yts = require("yt-search");
 
 let btch = null;
@@ -26,10 +26,9 @@ try {
   btch = require("btch-downloader");
 } catch {}
 
-let snapsave = null;
+let trs = null;
 try {
-  const sn = require("snapsave-media-downloader");
-  snapsave = sn.snapsave || sn.default || sn;
+  trs = require("trs-media-downloader");
 } catch {}
 
 const {
@@ -63,7 +62,7 @@ const CREATOR_NAME = "Dimuth Sathsara";
 
 const logger = pino({ level: LOG_LEVEL });
 const app = express();
-app.set("trust proxy", 1); 
+app.set("trust proxy", 1);
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
@@ -311,7 +310,7 @@ function getOwnerJid(sock) {
 }
 
 function isOwner(sock, msg) {
-  const o = getOwnerJid(sock); 
+  const o = getOwnerJid(sock);
   if (!o) return false;
   if (msg.key?.fromMe) return true;
   return jidNumber(msg.key?.participant || msg.key?.remoteJid) === jidNumber(o);
@@ -342,13 +341,13 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS (Baileys 7.0.0-rc14 LID + Receipt Fix)
+// STATUS HANDLER (LID FIXED)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
   if (msg.key?.fromMe) return;
 
-  // Baileys v7 uses participantPn when sender comes as an @lid JID
+  // Resolve participant JIDs properly
   const rawParticipant = msg.key?.participantPn || msg.key?.participant || msg.participant || msg.key?.remoteJid;
   if (!rawParticipant || rawParticipant === "status@broadcast") return;
 
@@ -358,7 +357,7 @@ async function handleStatus(username, sock, msg) {
 
   const lidParticipant = msg.key?.participant && String(msg.key.participant).endsWith("@lid")
     ? msg.key.participant
-    : null;
+    : (msg.participantPn && String(msg.participantPn).endsWith("@lid") ? msg.participantPn : null);
 
   const ownerJid = getOwnerJid(sock);
   if (jidNumber(participant) === jidNumber(ownerJid)) return;
@@ -366,29 +365,36 @@ async function handleStatus(username, sock, msg) {
   const statusKey = {
     remoteJid: "status@broadcast",
     id: msg.key.id,
-    participant: lidParticipant || participant,
+    participant: lidParticipant || participant, // Prefer LID if available
     fromMe: false
   };
 
-  // 1) Status Auto-Read (Baileys v7 readMessages + sendReceipt fallback)
+  // 1) Status Auto-Read (LID-aware)
   if (s.statusRead === "ON") {
     try {
-      await sock.readMessages([msg.key]);
-    } catch {}
-    if (lidParticipant && lidParticipant !== participant) {
+      // Try readMessages with LID participant first
+      await sock.readMessages([{
+        remoteJid: "status@broadcast",
+        id: msg.key.id,
+        participant: lidParticipant || participant,
+        fromMe: false
+      }]);
+      logger.info(`[STATUS READ] Seen status of ${jidNumber(participant)}`);
+    } catch (e1) {
+      logger.warn(`readMessages failed: ${e1.message}`);
+      // Fallback to sendReceipt
       try {
-        await sock.readMessages([{ remoteJid: "status@broadcast", id: msg.key.id, participant, fromMe: false }]);
-      } catch {}
-    }
-    try {
-      if (typeof sock.sendReceipt === "function") {
-        await sock.sendReceipt("status@broadcast", participant, [msg.key.id], "read");
+        if (typeof sock.sendReceipt === "function") {
+          await sock.sendReceipt("status@broadcast", lidParticipant || participant, [msg.key.id], "read");
+          logger.info(`[STATUS READ] Seen via sendReceipt`);
+        }
+      } catch (e2) {
+        logger.warn(`sendReceipt failed: ${e2.message}`);
       }
-    } catch {}
-    logger.info(`[STATUS READ] Seen status of ${jidNumber(participant)}`);
+    }
   }
 
-  // 2) Status Auto-React (GREEN / RANDOM / CUSTOM TEXT)
+  // 2) Status Auto-React (LID-ONLY statusJidList to avoid ACK 479)
   if (s.statusReact !== "OFF") {
     let reactText = "💚";
     if (s.statusReact === "RANDOM") {
@@ -397,22 +403,32 @@ async function handleStatus(username, sock, msg) {
       reactText = s.customStatusReact || "💚";
     }
 
-    const jidList = Array.from(new Set([participant, lidParticipant, ownerJid].filter(Boolean)));
-    try {
-      await sock.sendMessage(
-        "status@broadcast",
-        { react: { text: reactText, key: statusKey } },
-        { statusJidList: jidList }
-      );
-      logger.info(`[STATUS REACT] ${reactText} → ${jidNumber(participant)}`);
-    } catch (e) {
-      logger.error("Status react failed: " + e.message);
+    // Build statusJidList using ONLY LID JIDs
+    const statusJidList = [];
+    if (lidParticipant) statusJidList.push(lidParticipant);
+    if (sock.user?.lid) statusJidList.push(sock.user.lid);
+
+    const uniqueLidList = [...new Set(statusJidList.filter(Boolean))];
+
+    if (uniqueLidList.length === 0) {
+      logger.warn("Status react skipped: No LID JIDs available.");
+    } else {
+      try {
+        await sock.sendMessage(
+          "status@broadcast",
+          { react: { text: reactText, key: statusKey } },
+          { statusJidList: uniqueLidList }
+        );
+        logger.info(`[STATUS REACT] ${reactText} → ${jidNumber(participant)} (LID-only)`);
+      } catch (e) {
+        logger.error("Status react failed: " + e.message);
+      }
     }
   }
 }
 
 // ==========================================
-// MEDIA HELPERS
+// MEDIA HELPERS (unchanged)
 // ==========================================
 function unwrapViewOnce(msg) {
   if (!msg?.message) return null;
@@ -446,9 +462,9 @@ function getQuotedMessage(msg) {
   if (!c?.quotedMessage || !c?.stanzaId) return null;
   const rJid = c.remoteJid || msg.key.remoteJid;
   const p = c.participant || rJid;
-  return { 
-    key: { remoteJid: rJid, fromMe: jidNumber(p) === jidNumber(msg.key?.fromMe ? msg.key.remoteJid : null), id: c.stanzaId, participant: p }, 
-    message: c.quotedMessage 
+  return {
+    key: { remoteJid: rJid, fromMe: jidNumber(p) === jidNumber(msg.key?.fromMe ? msg.key.remoteJid : null), id: c.stanzaId, participant: p },
+    message: c.quotedMessage
   };
 }
 function buildDownloadMessage(message) {
@@ -469,12 +485,12 @@ async function downloadWhatsAppMedia(sock, message) {
   return { buffer, ...info };
 }
 async function downloadViewOnceMedia(sock, msg) {
-  const vo = unwrapViewOnce(msg); 
+  const vo = unwrapViewOnce(msg);
   if (!vo) throw new Error("Not view-once.");
-  
+
   const content = vo.content;
   const innerMsg = { key: msg.key, message: msg.message };
-  
+
   if (!content.mediaKey) {
     const m = normalizeMessageContent(msg.message) || msg.message;
     const t = getContentType(m);
@@ -482,7 +498,7 @@ async function downloadViewOnceMedia(sock, msg) {
   }
 
   const buffer = await downloadMediaMessage(innerMsg, "buffer", {}, { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) });
-  
+
   if (!buffer?.length) throw new Error("Empty view-once buffer.");
   const map = { imageMessage:"image", videoMessage:"video", audioMessage:"audio" };
   return { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
@@ -512,41 +528,41 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
   try {
     const s = getSettings(username);
     if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg)) return false;
-    
-    const owner = getOwnerJid(sock); 
+
+    const owner = getOwnerJid(sock);
     if (!owner) return false;
-    
+
     const sender = msg.key?.participant || msg.key?.remoteJid;
     if (msg.key?.fromMe === true) return false;
     if (sender && jidNumber(sender) === jidNumber(owner)) return false;
-    
+
     const media = await downloadViewOnceMedia(sock, msg);
     const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.5`;
-    
+
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
     logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
     return true;
-  } catch(e) { 
-    logger.error("AutoSave VV Error: "+e.message); 
-    return false; 
+  } catch(e) {
+    logger.error("AutoSave VV Error: "+e.message);
+    return false;
   }
 }
 
 // ==========================================
-// VIEW ONCE & SAVE COMMAND (SILENT ERRORS)
+// VIEW ONCE & SAVE COMMAND (unchanged)
 // ==========================================
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg);
-  if (!q) return; 
-  if (!isViewOnceMessage(q)) return; 
+  if (!q) return;
+  if (!isViewOnceMessage(q)) return;
 
   try {
     const media = await downloadViewOnceMedia(sock, q);
     const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     if (!target) return;
     await sendWhatsAppMedia(sock, target, media);
-  } catch(e) { 
-    logger.error(`ViewOnce save error: ${e.message}`); 
+  } catch(e) {
+    logger.error(`ViewOnce save error: ${e.message}`);
   }
 }
 
@@ -557,13 +573,13 @@ async function handleSave(sock, username, msg) {
     const target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
-  } catch(e) { 
-    logger.error(`.save error: ${e.message}`); 
+  } catch(e) {
+    logger.error(`.save error: ${e.message}`);
   }
 }
 
 // ==========================================
-// GEMINI AI
+// GEMINI AI (unchanged)
 // ==========================================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 let geminiClient = null;
@@ -599,7 +615,7 @@ async function aiChat(query, options = {}) {
 }
 
 // ==========================================
-// OTHER COMMAND HELPERS
+// OTHER COMMAND HELPERS (unchanged)
 // ==========================================
 async function aiImage(prompt) {
   const seed = Math.floor(Math.random()*1000000);
@@ -674,11 +690,11 @@ async function textToVoice(text) {
   const lang = /[\u0D80-\u0DFF]/.test(text) ? "si" : "en";
   const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(text.slice(0,200))}&tl=${lang}&client=tw-ob`;
   const r = await axios.get(url, { responseType: "arraybuffer", timeout: 30000, headers: { "User-Agent": "Mozilla/5.0" } });
-  
+
   const jobId = crypto.randomBytes(6).toString("hex");
   const inPath = path.join(MEDIA_DIR, `${jobId}_in.mp3`);
   const outPath = path.join(MEDIA_DIR, `${jobId}_out.ogg`);
-  
+
   await fsp.writeFile(inPath, Buffer.from(r.data));
   try {
     await execFileAsync("ffmpeg", ["-y", "-i", inPath, "-c:a", "libopus", "-b:a", "32k", "-vbr", "on", "-compression_level", "10", "-frame_duration", "60", "-application", "voip", outPath], { timeout: 60000 });
@@ -740,7 +756,7 @@ async function sendContact(sock, jid, name, phone, quoted) {
 }
 
 // ==========================================
-// SETTINGS & MENUS
+// SETTINGS & MENUS (unchanged, but include them for completeness)
 // ==========================================
 function settingsMenu(u) {
   const s = getSettings(u);
@@ -901,7 +917,7 @@ async function sendMenu(sock, u, jid, msg) {
 }
 
 // ==========================================
-// ALIVE COMMAND
+// ALIVE COMMAND (unchanged)
 // ==========================================
 async function sendAlive(sock, username, jid, msg) {
   const s = getSettings(username);
@@ -975,10 +991,10 @@ async function sendAlive(sock, username, jid, msg) {
 
   try {
     const audioRes = await axios.get(MENU_AUDIO_URL, { responseType: "arraybuffer", timeout: 20000 });
-    await sock.sendMessage(jid, { 
-      audio: Buffer.from(audioRes.data), 
-      mimetype: "audio/mpeg", 
-      ptt: false 
+    await sock.sendMessage(jid, {
+      audio: Buffer.from(audioRes.data),
+      mimetype: "audio/mpeg",
+      ptt: false
     });
   } catch (e) {
     logger.warn("Alive audio failed: " + e.message);
@@ -986,7 +1002,7 @@ async function sendAlive(sock, username, jid, msg) {
 }
 
 // ==========================================
-// MENU BUTTONS (1-9)
+// MENU BUTTONS (1-9) (unchanged)
 // ==========================================
 async function handleMenuNumber(sock, username, jid, num, msg) {
   if (num === "1") {
@@ -1092,7 +1108,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// MULTI-API + SCRAPER + YT-DLP DOWNLOADER (100% WORKING)
+// DOWNLOADER (Facebook FIXED with trs-media-downloader)
 // ==========================================
 function isSupportedUrl(url) { return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url); }
 
@@ -1152,7 +1168,55 @@ function findMediaUrlInObject(obj, type) {
   return null;
 }
 
-// Direct Facebook Page Scraper (No API limits, parses HD/SD mp4 directly)
+// ==========================================
+// FACEBOOK: trs-media-downloader (FIXED)
+// ==========================================
+async function downloadFacebook(url, type) {
+  // 1) Try trs-media-downloader (most reliable)
+  if (trs && typeof trs.rebelaldwn === "function") {
+    try {
+      const data = await trs.rebelaldwn(url);
+      let mediaUrl = null;
+      if (type === "audio") {
+        mediaUrl = data.audio;
+      } else {
+        mediaUrl = data.video?.hd || data.video?.sd || data.video;
+      }
+      if (mediaUrl && mediaUrl.startsWith("http")) {
+        return { buffer: await fetchMediaBuffer(mediaUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
+      }
+    } catch (e) {
+      logger.warn("trs-media-downloader FB error: " + e.message);
+    }
+  }
+
+  // 2) Fallback to btch-downloader
+  if (btch?.fbdown) {
+    try {
+      const res = await btch.fbdown(url);
+      const mediaUrl = findMediaUrlInObject(res, type);
+      if (mediaUrl) {
+        return { buffer: await fetchMediaBuffer(mediaUrl), ext: ".mp4" };
+      }
+    } catch (e) {
+      logger.warn("btch fbdown error: " + e.message);
+    }
+  }
+
+  // 3) Fallback to direct scraper (if exists)
+  const scrapedUrl = await scrapeFacebookDirect(url);
+  if (scrapedUrl) {
+    try {
+      return { buffer: await fetchMediaBuffer(scrapedUrl), ext: ".mp4" };
+    } catch (e) {
+      logger.warn("FB scraped URL download error: " + e.message);
+    }
+  }
+
+  return null;
+}
+
+// Keep the direct scraper as a fallback (unchanged)
 async function scrapeFacebookDirect(fbUrl) {
   try {
     let resolvedUrl = fbUrl;
@@ -1218,7 +1282,9 @@ async function scrapeFacebookDirect(fbUrl) {
   return null;
 }
 
-// Savetube CDN YouTube Downloader (Works on Datacenter/Railway IPs without cookies)
+// ==========================================
+// YOUTUBE & TIKTOK (unchanged, but integrated)
+// ==========================================
 async function downloadYouTubeSavetube(url, type) {
   const format = type === "audio" ? "mp3" : "720";
   const cdnList = [54, 51, 52, 53, 55, 56, 57, 58, 59, 60, 61];
@@ -1262,7 +1328,6 @@ async function downloadYouTubeSavetube(url, type) {
   return null;
 }
 
-// OceanSaver / Loader.to YouTube Downloader (Multi-server bypass for YouTube Bot Check)
 async function downloadYouTubeOceanSaver(url, type) {
   try {
     const format = type === "audio" ? "mp3" : "720";
@@ -1291,9 +1356,7 @@ async function downloadYouTubeOceanSaver(url, type) {
 }
 
 async function downloadViaDirectAPIs(url, type) {
-  // ==========================================
-  // 1) TIKTOK (tikwm API + btch)
-  // ==========================================
+  // TikTok
   if (/tiktok\.com/i.test(url)) {
     try {
       const r = await axios.post(
@@ -1337,82 +1400,23 @@ async function downloadViaDirectAPIs(url, type) {
     }
   }
 
-  // ==========================================
-  // 2) FACEBOOK (snapsave + btch + direct scraper + multi-API)
-  // ==========================================
+  // Facebook (using the new function)
   if (/facebook\.com|fb\.watch|fb\.com/i.test(url)) {
-    // 2a) snapsave-media-downloader
-    if (typeof snapsave === "function") {
-      try {
-        const res = await snapsave(url);
-        const list = res?.data || res;
-        const mediaUrl = findMediaUrlInObject(list, type);
-        if (mediaUrl) {
-          return { buffer: await fetchMediaBuffer(mediaUrl), ext: ".mp4" };
-        }
-      } catch (e) {
-        logger.warn("snapsave FB error: " + e.message);
-      }
-    }
-
-    // 2b) btch-downloader
-    if (btch?.fbdown) {
-      try {
-        const res = await btch.fbdown(url);
-        const mediaUrl = findMediaUrlInObject(res, type);
-        if (mediaUrl) {
-          return { buffer: await fetchMediaBuffer(mediaUrl), ext: ".mp4" };
-        }
-      } catch (e) {
-        logger.warn("btch fbdown error: " + e.message);
-      }
-    }
-
-    // 2c) Direct Facebook HTML Scraper
-    const scrapedUrl = await scrapeFacebookDirect(url);
-    if (scrapedUrl) {
-      try {
-        return { buffer: await fetchMediaBuffer(scrapedUrl), ext: ".mp4" };
-      } catch (e) {
-        logger.warn("FB scraped URL download error: " + e.message);
-      }
-    }
-
-    // 2d) Multi-API fallbacks
-    const fbApis = [
-      `https://api.ryzendesu.vip/api/downloader/fb?url=${encodeURIComponent(url)}`,
-      `https://api.siputzx.my.id/api/d/facebook?url=${encodeURIComponent(url)}`,
-      `https://api.vreden.my.id/api/fbdl?url=${encodeURIComponent(url)}`,
-      `https://widipe.com/download/fbdown?url=${encodeURIComponent(url)}`
-    ];
-    for (const apiUrl of fbApis) {
-      try {
-        const r = await axios.get(apiUrl, { timeout: 25000 });
-        const link = findMediaUrlInObject(r.data?.data || r.data?.result || r.data, type);
-        if (link) {
-          return { buffer: await fetchMediaBuffer(link), ext: ".mp4" };
-        }
-      } catch {}
-    }
+    return await downloadFacebook(url, type);
   }
 
-  // ==========================================
-  // 3) YOUTUBE (Savetube CDN + OceanSaver + btch + Multi-API)
-  // ==========================================
+  // YouTube
   if (/youtube\.com|youtu\.be/i.test(url)) {
-    // 3a) Savetube CDN
     const stBuf = await downloadYouTubeSavetube(url, type);
     if (stBuf) {
       return { buffer: stBuf, ext: type === "audio" ? ".mp3" : ".mp4" };
     }
 
-    // 3b) OceanSaver / Loader.to
     const osBuf = await downloadYouTubeOceanSaver(url, type);
     if (osBuf) {
       return { buffer: osBuf, ext: type === "audio" ? ".mp3" : ".mp4" };
     }
 
-    // 3c) btch-downloader
     if (btch?.youtube) {
       try {
         const res = await btch.youtube(url);
@@ -1425,7 +1429,6 @@ async function downloadViaDirectAPIs(url, type) {
       }
     }
 
-    // 3d) Multi-API fallbacks
     const ytApis = type === "audio"
       ? [
           `https://api.ryzendesu.vip/api/downloader/ytmp3?url=${encodeURIComponent(url)}`,
@@ -1572,19 +1575,16 @@ async function executeDownload(sock, username, msg, url, type) {
     let ext = dlType === "audio" ? ".mp3" : dlType === "image" ? ".jpg" : ".mp4";
     let tempFile = null;
 
-    // Step 1: Try Fast Direct APIs & Scrapers (TikWM / Savetube / OceanSaver / Snapsave / btch)
     const apiResult = await downloadViaDirectAPIs(url, dlType);
     if (apiResult && apiResult.buffer) {
       buffer = apiResult.buffer;
       ext = apiResult.ext || ext;
     } else {
-      // Step 2: Backup to yt-dlp
       tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
       ext = path.extname(tempFile).toLowerCase();
       buffer = await fsp.readFile(tempFile);
     }
 
-    // If user requested audio on Facebook/TikTok and we got an mp4 buffer, send it with audio/mp4 mimetype
     if (type === "audio" || [".mp3",".m4a",".aac",".webm",".opus",".ogg"].includes(ext)) {
       const audioMimeTypes = {
         ".mp3": "audio/mpeg",
@@ -1614,17 +1614,17 @@ async function executeDownload(sock, username, msg, url, type) {
 }
 
 // ==========================================
-// ANTI-DELETE
+// ANTI-DELETE (unchanged)
 // ==========================================
 async function handleDeletedMessages(username, sock, deletedKeys) {
   const s = getSettings(username);
   if (s.antiDelete !== "ON" || !Array.isArray(deletedKeys)) return;
-  
+
   for (const key of deletedKeys) {
     try {
-      const cached = getCachedMessage(key); 
+      const cached = getCachedMessage(key);
       if (!cached) continue;
-      
+
       const target = s.antiDelTarget === "SAME" ? key.remoteJid : getOwnerJid(sock);
       if (!target) continue;
 
@@ -1635,12 +1635,12 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
       if (media) {
         try {
           const dm = await downloadWhatsAppMedia(sock, cached);
-          await sendWhatsAppMedia(sock, target, { 
-            ...dm, 
-            content: { ...dm.content, caption: `🗑️ *DELETED MEDIA*\n👤 From: ${sender}\n\n${dm.content?.caption || ""}` } 
+          await sendWhatsAppMedia(sock, target, {
+            ...dm,
+            content: { ...dm.content, caption: `🗑️ *DELETED MEDIA*\n👤 From: ${sender}\n\n${dm.content?.caption || ""}` }
           });
-        } catch { 
-          await sock.sendMessage(target, { text: `🗑️ *DELETED MEDIA*\n👤 From: ${sender}` }); 
+        } catch {
+          await sock.sendMessage(target, { text: `🗑️ *DELETED MEDIA*\n👤 From: ${sender}` });
         }
       } else if (t) {
         await sock.sendMessage(target, { text: `🗑️ *DELETED MSG*\n👤 From: ${sender}\n\n${t}` });
@@ -1654,7 +1654,7 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
 }
 
 // ==========================================
-// NEW COMMANDS HANDLERS
+// NEW COMMANDS HANDLERS (unchanged)
 // ==========================================
 async function handleNewCommands(sock, username, msg, cmd, args, text) {
   const s = getSettings(username);
@@ -1669,7 +1669,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
   }
-  
+
   if (cmd === ".code") {
     if (s.codingHelper !== "ON") return false;
     const q = text.slice(5).trim();
@@ -1684,7 +1684,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     if (s.songSearch !== "ON") return false;
     const q = text.slice(5).trim();
     if (!q) { await sock.sendMessage(jid, { text: "❌ Usage: .song <name>" }, { quoted: msg }); return true; }
-    
+
     await sock.sendMessage(jid, { text: "🔍 Searching..." }, { quoted: msg });
     try {
       const search = await yts(q);
@@ -1692,10 +1692,10 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
       if (!video) throw new Error("No results found.");
 
       const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author.name}\n⏱ *Duration:* ${video.timestamp}\n👀 *Views:* ${video.views}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.5`;
-      
+
       await sock.sendMessage(jid, { image: { url: video.thumbnail }, caption: caption }, { quoted: msg });
-    } catch(e) { 
-      await sock.sendMessage(jid, { text: `❌ Search failed: ${e.message}` }, { quoted: msg }); 
+    } catch(e) {
+      await sock.sendMessage(jid, { text: `❌ Search failed: ${e.message}` }, { quoted: msg });
     }
     return true;
   }
@@ -1783,9 +1783,9 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     const t = text.slice(6).trim();
     if (!t) { await sock.sendMessage(jid, { text: "❌ Usage: .voice <text>" }, { quoted: msg }); return true; }
     await sock.sendMessage(jid, { text: "🎙️ Converting text to voice..." }, { quoted: msg });
-    try { 
-      const r = await textToVoice(t); 
-      await sock.sendMessage(jid, { audio: r.buffer, mimetype: r.mimetype, ptt: true }, { quoted: msg }); 
+    try {
+      const r = await textToVoice(t);
+      await sock.sendMessage(jid, { audio: r.buffer, mimetype: r.mimetype, ptt: true }, { quoted: msg });
     }
     catch(e) { await sock.sendMessage(jid, { text: `❌ ${e.message}` }, { quoted: msg }); }
     return true;
@@ -1897,7 +1897,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
 }
 
 // ==========================================
-// VIEW-ONCE DOT TRIGGER LOGIC
+// VIEW-ONCE DOT TRIGGER LOGIC (unchanged)
 // ==========================================
 const KNOWN_COMMAND_WORDS = new Set([
   "menu","help","save","ping","alive","settings","setting","dp","ai","code",
@@ -1925,7 +1925,7 @@ function isDotViewOnceTrigger(text, quotedMsg) {
 }
 
 // ==========================================
-// MAIN ROUTER
+// MAIN ROUTER (unchanged)
 // ==========================================
 async function handleMessage(username, sock, msg) {
   const accessMeta = botOwnersDB?.[cleanUsername(username)];
@@ -1964,7 +1964,6 @@ async function handleMessage(username, sock, msg) {
   const text = getMessageText(msg).trim();
   if (!text) return;
 
-  // Check if owner is currently entering custom text for 5.4
   const clean = cleanUsername(username);
   const waitKey = `${clean}_${msg.key.remoteJid}`;
   if (awaitingCustomStatusText.has(waitKey) && isOwner(sock, msg)) {
@@ -2007,7 +2006,6 @@ async function handleMessage(username, sock, msg) {
 
   if (!canProcessMessage(sock, username, msg)) return;
 
-  // === AUTO TYPING / AUTO VOICE ===
   const isIncoming = !msg.key.fromMe;
   if (isIncoming && s.autoVoice === "ON") {
     await sock.sendPresenceUpdate("recording", msg.key.remoteJid).catch(()=>{});
@@ -2070,7 +2068,7 @@ async function handleMessage(username, sock, msg) {
 }
 
 // ==========================================
-// BOT CONNECTION (WITH OWNER JID FIX)
+// BOT CONNECTION (unchanged)
 // ==========================================
 async function startBot(username, opts = {}) {
   const clean = cleanUsername(username);
@@ -2095,7 +2093,7 @@ async function startBot(username, opts = {}) {
     sock.__d = clean;
     bots.set(clean, sock);
     getSettings(clean); getStats(clean);
-    
+
     sock.ev.on("creds.update", async () => {
       await saveCreds();
       if (isConnected(sock) && getSettings(clean).alwaysOnline !== "ON") {
@@ -2190,7 +2188,7 @@ async function startBot(username, opts = {}) {
 }
 
 // ==========================================
-// PAIRING
+// PAIRING (unchanged)
 // ==========================================
 async function getPairingCode(username, phone) {
   const clean = cleanUsername(username);
@@ -2213,7 +2211,7 @@ async function getPairingCode(username, phone) {
 }
 
 // ==========================================
-// EXPRESS ROUTES
+// EXPRESS ROUTES (unchanged)
 // ==========================================
 app.get("/get-pairing-code", requireAuth, async (req, res) => {
   try {
