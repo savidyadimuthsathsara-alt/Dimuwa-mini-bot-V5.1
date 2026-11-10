@@ -1,7 +1,7 @@
 {
   "name": "dimuwa-mini-bot",
-  "version": "5.5.1",
-  "description": "DIMUWA WhatsApp Mini Bot V5.5 - LID Fixed",
+  "version": "5.5.2",
+  "description": "DIMUWA WhatsApp Mini Bot V5.5 - LID Fixed Status Read/React",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
