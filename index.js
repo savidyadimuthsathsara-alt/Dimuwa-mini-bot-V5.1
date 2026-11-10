@@ -376,68 +376,86 @@ async function resolveToLid(sock, jid) {
 }
 
 // ==========================================
-// STATUS HANDLER (LID FIXED – Read + React)
+// STATUS HANDLER (FIXED – Read + Text/Emoji React ONLY)
 // ==========================================
 async function handleStatus(username, sock, msg) {
-  const s = getSettings(username);
-  if (msg.key?.fromMe) return;
+  try {
+    const s = getSettings(username);
+    if (!msg?.key || msg.key.fromMe) return;
 
-  // 1) Status එවපු කෙනාගේ JID එක හඳුනා ගැනීම
-  const rawParticipant = msg.key?.participantPn || msg.key?.participant || msg.participant || msg.key?.remoteJid;
-  if (!rawParticipant || rawParticipant === "status@broadcast") return;
+    // Protocol හෝ Reaction messages මගහැරීම
+    if (msg.message?.protocolMessage || msg.message?.reactionMessage) return;
 
-  const ownerJid = getOwnerJid(sock);
-  if (jidNumber(rawParticipant) === jidNumber(ownerJid)) return;
+    // 1) Status එවපු කෙනාගේ Original Participant JID එක ලබා ගැනීම
+    const rawParticipant = msg.key.participant || msg.participant || msg.key.participantPn;
+    if (!rawParticipant || rawParticipant === "status@broadcast") return;
 
-  // 2) PN JID එක LID JID එකට resolve කිරීම (අත්‍යවශ්‍යයි!)
-  const lidParticipant = await resolveToLid(sock, rawParticipant);
-  if (!lidParticipant) return;
+    const ownerJid = getOwnerJid(sock);
+    const senderNum = jidNumber(msg.key.participantPn || rawParticipant);
+    if (ownerJid && senderNum && senderNum === jidNumber(ownerJid)) return;
 
-  const statusKey = {
-    remoteJid: "status@broadcast",
-    id: msg.key.id,
-    participant: lidParticipant,   // 👈 LID JID එක පමණක් යොදන්න
-    fromMe: false
-  };
+    // PN JID සහ LID JID දෙකම ලබා ගැනීම
+    const pnParticipant = msg.key.participantPn || (rawParticipant.endsWith("@s.whatsapp.net") ? rawParticipant : (senderNum ? `${senderNum}@s.whatsapp.net` : null));
+    const lidParticipant = rawParticipant.endsWith("@lid") ? rawParticipant : await resolveToLid(sock, pnParticipant || rawParticipant);
 
-  // ---- (A) STATUS READ (Seen) ----
-  if (s.statusRead === "ON") {
-    try {
-      // sendReceipt එකට LID participant එක දෙන්න
-      if (typeof sock.sendReceipt === "function") {
-        await sock.sendReceipt("status@broadcast", lidParticipant, [msg.key.id], "read");
-        logger.info(`[STATUS READ] ✅ Seen via sendReceipt → ${jidNumber(lidParticipant)}`);
-      } else {
-        // Fallback: readMessages
-        await sock.readMessages([{ remoteJid: "status@broadcast", id: msg.key.id, participant: lidParticipant, fromMe: false }]);
-        logger.info(`[STATUS READ] ✅ Seen via readMessages → ${jidNumber(lidParticipant)}`);
+    // Status එකට ආපු Original Key එකම වෙනස් නොකර ගැනීම
+    const statusKey = {
+      remoteJid: "status@broadcast",
+      id: msg.key.id,
+      participant: msg.key.participant || lidParticipant || rawParticipant,
+      fromMe: false
+    };
+
+    // ---- (A) STATUS READ (Seen) ----
+    if (s.statusRead === "ON") {
+      try {
+        await sock.readMessages([statusKey]);
+        logger.info(`[STATUS READ] ✅ Seen → ${senderNum || rawParticipant}`);
+      } catch (e) {
+        try {
+          if (typeof sock.sendReceipt === "function") {
+            await sock.sendReceipt("status@broadcast", statusKey.participant, [msg.key.id], "read");
+          }
+        } catch (err) {
+          logger.warn(`Status read failed: ${err.message}`);
+        }
       }
-    } catch (e) {
-      logger.warn(`Status read failed: ${e.message}`);
     }
-  }
 
-  // ---- (B) STATUS REACT ----
-  if (s.statusReact !== "OFF") {
-    let reactText = "💚";
-    if (s.statusReact === "RANDOM") reactText = statusReactList[Math.floor(Math.random() * statusReactList.length)];
-    else if (s.statusReact === "CUSTOM") reactText = s.customStatusReact || "💚";
+    // ---- (B) STATUS REACT (Emoji හෝ Text එක Reaction එකක් ලෙසම යැවීම) ----
+    if (s.statusReact !== "OFF") {
+      let reactText = "💚";
+      if (s.statusReact === "RANDOM") {
+        reactText = statusReactList[Math.floor(Math.random() * statusReactList.length)];
+      } else if (s.statusReact === "CUSTOM") {
+        reactText = (s.customStatusReact || "💚").trim();
+      }
 
-    // statusJidList එකට LID JIDs පමණක් දාන්න (PN මිශ්‍ර කරන්න එපා!)
-    const jidList = [lidParticipant];
-    if (sock.user?.lid) jidList.push(sock.user.lid);
-    const uniqueLidList = [...new Set(jidList.filter(Boolean))];
+      // Status JID List එකට Sender සහ Bot ගේ PN + LID දෙකම ඇතුළත් කිරීම
+      const botPn = ownerJid || (sock.user?.id ? `${jidNumber(sock.user.id)}@s.whatsapp.net` : null);
+      const botLid = sock.user?.lid ? `${sock.user.lid.split(":")[0].split("@")[0]}@lid` : null;
 
-    try {
-      await sock.sendMessage(
-        "status@broadcast",
-        { react: { text: reactText, key: statusKey } },
-        { statusJidList: uniqueLidList }
-      );
-      logger.info(`[STATUS REACT] ${reactText} → ${jidNumber(lidParticipant)} (LID-only list)`);
-    } catch (e) {
-      logger.error("Status react failed: " + e.message);
+      const statusJidList = [...new Set([
+        statusKey.participant,
+        pnParticipant,
+        lidParticipant,
+        botPn,
+        botLid
+      ].filter(Boolean))];
+
+      try {
+        await sock.sendMessage(
+          "status@broadcast",
+          { react: { text: reactText, key: statusKey } },
+          { statusJidList }
+        );
+        logger.info(`[STATUS REACT] "${reactText}" → ${senderNum || rawParticipant}`);
+      } catch (e) {
+        logger.error("Status react failed: " + e.message);
+      }
     }
+  } catch (err) {
+    logger.error("handleStatus error: " + err.message);
   }
 }
 
