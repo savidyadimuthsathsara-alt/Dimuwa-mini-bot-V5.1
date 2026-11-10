@@ -341,88 +341,102 @@ function getCachedMessage(k) {
 setInterval(() => { const n = Date.now(); for (const [k,v] of messageCache) { if (n-v.savedAt > CACHE_TTL) messageCache.delete(k); } }, 10*60*1000);
 
 // ==========================================
-// STATUS HANDLER (LID FIXED)
+// LID RESOLUTION HELPER
+// ==========================================
+/**
+ * PN JID එකක් හෝ LID JID එකක් ලැබුණු විට, LID JID එක return කරයි.
+ * Baileys 7.x හි signalRepository.lidMapping භාවිතා කරයි.
+ */
+async function resolveToLid(sock, jid) {
+  if (!jid) return null;
+  const str = String(jid);
+
+  // දැනටමත් LID නම් එලෙසම return කරන්න
+  if (str.endsWith("@lid")) return str;
+
+  // PN JID එකක් නම් LID එකට resolve කරන්න
+  if (str.endsWith("@s.whatsapp.net")) {
+    try {
+      const lidMapping = sock?.signalRepository?.lidMapping;
+      if (lidMapping && typeof lidMapping.getLIDForPN === "function") {
+        const lid = await lidMapping.getLIDForPN(str);
+        if (lid && String(lid).endsWith("@lid")) {
+          return lid;
+        }
+      }
+    } catch (e) {
+      logger.warn(`resolveToLid failed for ${str}: ${e.message}`);
+    }
+
+    // Resolve කරන්න බැරි නම්, PN එකම return කරන්න (fallback)
+    return str;
+  }
+
+  return str;
+}
+
+// ==========================================
+// STATUS HANDLER (LID FIXED – Read + React)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   const s = getSettings(username);
   if (msg.key?.fromMe) return;
 
-  // Resolve participant JIDs properly
+  // 1) Status එවපු කෙනාගේ JID එක හඳුනා ගැනීම
   const rawParticipant = msg.key?.participantPn || msg.key?.participant || msg.participant || msg.key?.remoteJid;
   if (!rawParticipant || rawParticipant === "status@broadcast") return;
 
-  const participant = typeof jidNormalizedUser === "function"
-    ? jidNormalizedUser(rawParticipant)
-    : `${jidNumber(rawParticipant)}@s.whatsapp.net`;
-
-  const lidParticipant = msg.key?.participant && String(msg.key.participant).endsWith("@lid")
-    ? msg.key.participant
-    : (msg.participantPn && String(msg.participantPn).endsWith("@lid") ? msg.participantPn : null);
-
   const ownerJid = getOwnerJid(sock);
-  if (jidNumber(participant) === jidNumber(ownerJid)) return;
+  if (jidNumber(rawParticipant) === jidNumber(ownerJid)) return;
+
+  // 2) PN JID එක LID JID එකට resolve කිරීම (අත්‍යවශ්‍යයි!)
+  const lidParticipant = await resolveToLid(sock, rawParticipant);
+  if (!lidParticipant) return;
 
   const statusKey = {
     remoteJid: "status@broadcast",
     id: msg.key.id,
-    participant: lidParticipant || participant, // Prefer LID if available
+    participant: lidParticipant,   // 👈 LID JID එක පමණක් යොදන්න
     fromMe: false
   };
 
-  // 1) Status Auto-Read (LID-aware)
+  // ---- (A) STATUS READ (Seen) ----
   if (s.statusRead === "ON") {
     try {
-      // Try readMessages with LID participant first
-      await sock.readMessages([{
-        remoteJid: "status@broadcast",
-        id: msg.key.id,
-        participant: lidParticipant || participant,
-        fromMe: false
-      }]);
-      logger.info(`[STATUS READ] Seen status of ${jidNumber(participant)}`);
-    } catch (e1) {
-      logger.warn(`readMessages failed: ${e1.message}`);
-      // Fallback to sendReceipt
-      try {
-        if (typeof sock.sendReceipt === "function") {
-          await sock.sendReceipt("status@broadcast", lidParticipant || participant, [msg.key.id], "read");
-          logger.info(`[STATUS READ] Seen via sendReceipt`);
-        }
-      } catch (e2) {
-        logger.warn(`sendReceipt failed: ${e2.message}`);
+      // sendReceipt එකට LID participant එක දෙන්න
+      if (typeof sock.sendReceipt === "function") {
+        await sock.sendReceipt("status@broadcast", lidParticipant, [msg.key.id], "read");
+        logger.info(`[STATUS READ] ✅ Seen via sendReceipt → ${jidNumber(lidParticipant)}`);
+      } else {
+        // Fallback: readMessages
+        await sock.readMessages([{ remoteJid: "status@broadcast", id: msg.key.id, participant: lidParticipant, fromMe: false }]);
+        logger.info(`[STATUS READ] ✅ Seen via readMessages → ${jidNumber(lidParticipant)}`);
       }
+    } catch (e) {
+      logger.warn(`Status read failed: ${e.message}`);
     }
   }
 
-  // 2) Status Auto-React (LID-ONLY statusJidList to avoid ACK 479)
+  // ---- (B) STATUS REACT ----
   if (s.statusReact !== "OFF") {
     let reactText = "💚";
-    if (s.statusReact === "RANDOM") {
-      reactText = statusReactList[Math.floor(Math.random() * statusReactList.length)];
-    } else if (s.statusReact === "CUSTOM") {
-      reactText = s.customStatusReact || "💚";
-    }
+    if (s.statusReact === "RANDOM") reactText = statusReactList[Math.floor(Math.random() * statusReactList.length)];
+    else if (s.statusReact === "CUSTOM") reactText = s.customStatusReact || "💚";
 
-    // Build statusJidList using ONLY LID JIDs
-    const statusJidList = [];
-    if (lidParticipant) statusJidList.push(lidParticipant);
-    if (sock.user?.lid) statusJidList.push(sock.user.lid);
+    // statusJidList එකට LID JIDs පමණක් දාන්න (PN මිශ්‍ර කරන්න එපා!)
+    const jidList = [lidParticipant];
+    if (sock.user?.lid) jidList.push(sock.user.lid);
+    const uniqueLidList = [...new Set(jidList.filter(Boolean))];
 
-    const uniqueLidList = [...new Set(statusJidList.filter(Boolean))];
-
-    if (uniqueLidList.length === 0) {
-      logger.warn("Status react skipped: No LID JIDs available.");
-    } else {
-      try {
-        await sock.sendMessage(
-          "status@broadcast",
-          { react: { text: reactText, key: statusKey } },
-          { statusJidList: uniqueLidList }
-        );
-        logger.info(`[STATUS REACT] ${reactText} → ${jidNumber(participant)} (LID-only)`);
-      } catch (e) {
-        logger.error("Status react failed: " + e.message);
-      }
+    try {
+      await sock.sendMessage(
+        "status@broadcast",
+        { react: { text: reactText, key: statusKey } },
+        { statusJidList: uniqueLidList }
+      );
+      logger.info(`[STATUS REACT] ${reactText} → ${jidNumber(lidParticipant)} (LID-only list)`);
+    } catch (e) {
+      logger.error("Status react failed: " + e.message);
     }
   }
 }
@@ -756,7 +770,7 @@ async function sendContact(sock, jid, name, phone, quoted) {
 }
 
 // ==========================================
-// SETTINGS & MENUS (unchanged, but include them for completeness)
+// SETTINGS & MENUS (unchanged)
 // ==========================================
 function settingsMenu(u) {
   const s = getSettings(u);
@@ -1172,7 +1186,6 @@ function findMediaUrlInObject(obj, type) {
 // FACEBOOK: trs-media-downloader (FIXED)
 // ==========================================
 async function downloadFacebook(url, type) {
-  // 1) Try trs-media-downloader (most reliable)
   if (trs && typeof trs.rebelaldwn === "function") {
     try {
       const data = await trs.rebelaldwn(url);
@@ -1190,7 +1203,6 @@ async function downloadFacebook(url, type) {
     }
   }
 
-  // 2) Fallback to btch-downloader
   if (btch?.fbdown) {
     try {
       const res = await btch.fbdown(url);
@@ -1203,7 +1215,6 @@ async function downloadFacebook(url, type) {
     }
   }
 
-  // 3) Fallback to direct scraper (if exists)
   const scrapedUrl = await scrapeFacebookDirect(url);
   if (scrapedUrl) {
     try {
