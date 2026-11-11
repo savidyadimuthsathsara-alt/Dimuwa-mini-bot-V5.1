@@ -381,28 +381,30 @@ async function resolveToLid(sock, jid) {
 async function handleStatus(username, sock, msg) {
   try {
     const s = getSettings(username);
-    if (!msg?.key || msg.key.fromMe) return;
+    const incomingKey = msg?.key;
+    if (!incomingKey || incomingKey.fromMe || incomingKey.remoteJid !== "status@broadcast") return;
+    if (!incomingKey.id || msg.message?.protocolMessage || msg.message?.reactionMessage) return;
 
-    // Protocol හෝ Reaction messages මගහැරීම
-    if (msg.message?.protocolMessage || msg.message?.reactionMessage) return;
-
-    // 1) Status එවපු කෙනාගේ Original Participant JID එක ලබා ගැනීම
-    const rawParticipant = msg.key.participant || msg.participant || msg.key.participantPn;
-    if (!rawParticipant || rawParticipant === "status@broadcast") return;
+    // Baileys may provide the status author as a PN, LID, or both.
+    const authorJid = incomingKey.participant || incomingKey.participantPn || msg.participant;
+    if (!authorJid || authorJid === "status@broadcast") {
+      logger.warn("[STATUS] Skipped: status author JID is missing.");
+      return;
+    }
 
     const ownerJid = getOwnerJid(sock);
-    const senderNum = jidNumber(msg.key.participantPn || rawParticipant);
+    const authorPn = incomingKey.participantPn ||
+      (String(authorJid).endsWith("@s.whatsapp.net") ? authorJid : null);
+    const senderNum = jidNumber(authorPn || authorJid);
+
     if (ownerJid && senderNum && senderNum === jidNumber(ownerJid)) return;
 
-    // PN JID සහ LID JID දෙකම ලබා ගැනීම
-    const pnParticipant = msg.key.participantPn || (rawParticipant.endsWith("@s.whatsapp.net") ? rawParticipant : (senderNum ? `${senderNum}@s.whatsapp.net` : null));
-    const lidParticipant = rawParticipant.endsWith("@lid") ? rawParticipant : await resolveToLid(sock, pnParticipant || rawParticipant);
-
-    // Status එකට ආපු Original Key එකම වෙනස් නොකර ගැනීම
+    // Keep Baileys' original status key intact; changing its participant can
+    // make WhatsApp reject both the read receipt and the reaction.
     const statusKey = {
+      ...incomingKey,
       remoteJid: "status@broadcast",
-      id: msg.key.id,
-      participant: msg.key.participant || lidParticipant || rawParticipant,
+      participant: incomingKey.participant || authorJid,
       fromMe: false
     };
 
@@ -410,38 +412,43 @@ async function handleStatus(username, sock, msg) {
     if (s.statusRead === "ON") {
       try {
         await sock.readMessages([statusKey]);
-        logger.info(`[STATUS READ] ✅ Seen → ${senderNum || rawParticipant}`);
-      } catch (e) {
+        logger.info(`[STATUS READ] Seen → ${senderNum || authorJid}`);
+      } catch (readError) {
         try {
           if (typeof sock.sendReceipt === "function") {
-            await sock.sendReceipt("status@broadcast", statusKey.participant, [msg.key.id], "read");
+            await sock.sendReceipt(
+              "status@broadcast",
+              statusKey.participant,
+              [statusKey.id],
+              "read"
+            );
+          } else {
+            logger.warn(`[STATUS READ] Failed: ${readError.message}`);
           }
-        } catch (err) {
-          logger.warn(`Status read failed: ${err.message}`);
+        } catch (receiptError) {
+          logger.warn(`[STATUS READ] Failed: ${receiptError.message}`);
         }
       }
     }
 
-    // ---- (B) STATUS REACT (Emoji හෝ Text එක Reaction එකක් ලෙසම යැවීම) ----
+    // ---- (B) STATUS REACT ----
     if (s.statusReact !== "OFF") {
       let reactText = "💚";
       if (s.statusReact === "RANDOM") {
         reactText = statusReactList[Math.floor(Math.random() * statusReactList.length)];
       } else if (s.statusReact === "CUSTOM") {
-        reactText = (s.customStatusReact || "💚").trim();
+        reactText = String(s.customStatusReact || "💚").trim() || "💚";
       }
 
-      // Status JID List එකට Sender සහ Bot ගේ PN + LID දෙකම ඇතුළත් කිරීම
-      const botPn = ownerJid || (sock.user?.id ? `${jidNumber(sock.user.id)}@s.whatsapp.net` : null);
-      const botLid = sock.user?.lid ? `${sock.user.lid.split(":")[0].split("@")[0]}@lid` : null;
+      // WhatsApp expects the status author and this account in statusJidList.
+      // Do not mix guessed PN/LID variants: that can invalidate the request.
+      const botJid = sock.user?.id
+        ? (typeof jidNormalizedUser === "function"
+            ? jidNormalizedUser(sock.user.id)
+            : sock.user.id)
+        : ownerJid;
 
-      const statusJidList = [...new Set([
-        statusKey.participant,
-        pnParticipant,
-        lidParticipant,
-        botPn,
-        botLid
-      ].filter(Boolean))];
+      const statusJidList = [...new Set([authorJid, botJid].filter(Boolean))];
 
       try {
         await sock.sendMessage(
@@ -449,9 +456,9 @@ async function handleStatus(username, sock, msg) {
           { react: { text: reactText, key: statusKey } },
           { statusJidList }
         );
-        logger.info(`[STATUS REACT] "${reactText}" → ${senderNum || rawParticipant}`);
-      } catch (e) {
-        logger.error("Status react failed: " + e.message);
+        logger.info(`[STATUS REACT] "${reactText}" → ${senderNum || authorJid}`);
+      } catch (reactError) {
+        logger.error(`[STATUS REACT] Failed: ${reactError.message}`);
       }
     }
   } catch (err) {
