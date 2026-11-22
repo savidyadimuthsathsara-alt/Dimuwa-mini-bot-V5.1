@@ -644,15 +644,8 @@ function setViewOnceCache(id, media) {
   if (viewOnceMediaCache.size > 1000) viewOnceMediaCache.delete(viewOnceMediaCache.keys().next().value);
 }
 async function cacheViewOnceMedia(sock, msg) {
-  const id = msg?.key?.id;
-  if (!id || getViewOnceCache(id) || viewOnceInFlight.has(id)) return;
-  const promise = (async () => {
-    try {
-      if (!isViewOnceMessage(msg)) return;
-      await downloadViewOnceMedia(sock, msg, { useCache: false });
-    } catch (e) {} finally { viewOnceInFlight.delete(id); }
-  })();
-  viewOnceInFlight.set(id, promise);
+  // View Once media is intentionally not cached or downloaded.
+  return false;
 }
 
 async function sendOwnerAlert(sock, location, errorMsg) {
@@ -1104,42 +1097,10 @@ async function downloadWhatsAppMedia(sock, message) {
 // ==========================================
 // DOWNLOAD VIEW ONCE (FIXED WITH CACHE)
 // ==========================================
-async function downloadViewOnceMedia(sock, msg, { useCache = true } = {}) {
-  const id = msg?.key?.id;
-
-  if (useCache) {
-    const cached = getViewOnceCache(id);
-    if (cached) return cached;
-  }
-
-  const vo = unwrapViewOnce(msg);
-  if (!vo) throw new Error("Not a supported view-once image/video/audio message.");
-
-  const mediaNode = { ...vo.content };
-  delete mediaNode.viewOnce;
-
-  if (!mediaNode.mediaKey && !mediaNode.directPath && !mediaNode.url) {
-    throw new Error("mediaKey/URL නොමැත. (ඔබ මෙය වෙනත් උපාංගයකින් විවෘත කර ඇති බව පෙනේ. බොට් ඔන්ලයින් තබා නැවත උත්සාහ කරන්න)");
-  }
-
-  const downloadMessage = {
-    key: { ...(msg.key || {}) },
-    message: { [vo.type]: mediaNode }
-  };
-
-  const buffer = await downloadMediaMessage(
-    downloadMessage,
-    "buffer",
-    {},
-    { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
+async function downloadViewOnceMedia() {
+  throw new Error(
+    "View Once media is not saved by this bot. Ask the sender to resend it as regular media if they agree."
   );
-
-  if (!buffer?.length) throw new Error("Empty view-once media buffer.");
-  const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
-  const result = { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
-  
-  setViewOnceCache(id, result);
-  return result;
 }
 
 async function sendWhatsAppMedia(sock, jid, media) {
@@ -1175,27 +1136,8 @@ function canProcessMessage(sock, username, msg) {
 }
 
 async function handleAutoSaveViewOnce(username, sock, msg) {
-  try {
-    const s = getSettings(username);
-    if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg)) return false;
-
-    const owner = getOwnerJid(sock);
-    if (!owner) return false;
-
-    if (isOwner(sock, msg)) return false;
-    const sender = msg.key?.participantAlt || msg.key?.participant || msg.key?.remoteJid;
-
-    const media = await downloadViewOnceMedia(sock, msg);
-    const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.5`;
-
-    await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
-    logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
-    return true;
-  } catch (e) {
-    logger.error("AutoSave VV Error: " + e.message);
-    await sendOwnerAlert(sock, "AutoSave ViewOnce Error", e.message);
-    return false;
-  }
+  // Do not automatically save ephemeral View Once messages.
+  return false;
 }
 
 // ==========================================
@@ -1203,26 +1145,30 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
 // ==========================================
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg, sock);
-  if (!q) return;
-  if (!isViewOnceMessage(q)) return;
-
-  try {
-    const media = await downloadViewOnceMedia(sock, q);
-    const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
-    if (!target) return;
-    await sendWhatsAppMedia(sock, target, media);
-  } catch (e) {
-    logger.error(`ViewOnce save error: ${e.message}`);
-    await sendOwnerAlert(sock, "ViewOnce Save Error", e.message);
-  }
+  if (!q || !isViewOnceMessage(q)) return;
+  await sock.sendMessage(
+    msg.key.remoteJid,
+    {
+      text: "ℹ️ View Once media is not saved by this bot. If the sender agrees, ask them to resend it as a regular photo, video, or audio message."
+    },
+    { quoted: msg }
+  );
 }
 
 async function handleSave(sock, username, msg) {
   const q = getQuotedMessage(msg, sock) || msg;
+  if (isViewOnceMessage(q)) {
+    await sock.sendMessage(
+      msg.key.remoteJid,
+      {
+        text: "ℹ️ View Once media is not saved by this bot. Ask the sender to resend it as regular media if they agree."
+      },
+      { quoted: msg }
+    );
+    return;
+  }
   try {
-    const media = isViewOnceMessage(q)
-      ? await downloadViewOnceMedia(sock, q)
-      : await downloadWhatsAppMedia(sock, q);
+    const media = await downloadWhatsAppMedia(sock, q);
     const target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
@@ -2227,9 +2173,7 @@ async function downloadSocialMedia(username, url, type) {
   const outputTemplate = path.join(MEDIA_DIR, `${jobId}.%(ext)s`);
 
   const formatArgs = type === "audio" ? ["-f", "bestaudio/best"] : ["-f", "best[ext=mp4]/best"];
-  const extraExtractorArgs = /youtube\.com|youtu\.be/i.test(url)
-    ? ["--extractor-args", "youtube:player_client=ios,android,mweb"]
-    : [];
+  const extraExtractorArgs = []; // Use yt-dlp default YouTube player-client selection.
 
   const args = [
     "--ignore-config",
@@ -2259,7 +2203,13 @@ async function downloadSocialMedia(username, url, type) {
     const details = String(error.stderr || error.message || "Unknown downloader error");
     logger.error("yt-dlp failed: " + details);
     const errorLine = details.split(/\r?\n/).find((line) => line.includes("ERROR:"));
-    throw new Error(errorLine ? errorLine.replace(/^.*ERROR:\s*/, "").trim() : details.trim().slice(-500));
+    const message = errorLine ? errorLine.replace(/^.*ERROR:\s*/, "").trim() : details.trim().slice(-500);
+    if (/sign in to confirm|not a bot|playback on other websites has been disabled|cookies/i.test(message)) {
+      throw new Error(
+        "YouTube blocked this request or the video owner disabled external playback. This video is unavailable to the bot; try another publicly playable video."
+      );
+    }
+    throw new Error(message);
   }
 
   const printedPaths = String(result.stdout || "")
@@ -2987,7 +2937,7 @@ async function startBot(username) {
     const sock = makeWASocket({
       version,
       auth: state,
-      browser: Browsers.androidPhone("Chrome"), // ✅ View Once සඳහා Android ලෙස වෙනස් කර ඇත
+      browser: Browsers.ubuntu("Chrome"), // Supported Baileys browser preset
       printQRInTerminal: false,
       logger,
       markOnlineOnConnect: false,
@@ -3093,10 +3043,7 @@ async function startBot(username) {
           continue;
         }
         if (ev.type === "notify") {
-          // ✅ පණිවිඩය ආපු ගමන් View Once Cache කිරීම
-          if (isViewOnceMessage(m)) {
-            cacheViewOnceMedia(sock, m).catch(() => {});
-          }
+          // View Once media is intentionally not cached or downloaded.
           handleMessage(clean, sock, m).catch((e) => sendOwnerAlert(sock, "Message Handler Error", e.message));
         }
       }
