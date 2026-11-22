@@ -1,7 +1,7 @@
 {
   "name": "dimuwa-mini-bot",
-  "version": "5.5.2",
-  "description": "DIMUWA WhatsApp Mini Bot V5.5 - LID Fixed Status Read/React",
+  "version": "5.5.3",
+  "description": "DIMUWA WhatsApp Mini Bot V5.5 - Fixed Login & Status React",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -19,7 +19,6 @@
     "express-session": "^1.18.2",
     "form-data": "^4.0.1",
     "node-cache": "^5.1.2",
-    "passport": "^0.7.0",
     "pino": "^9.6.0",
     "qrcode": "^1.5.4",
     "session-file-store": "^1.5.0",
