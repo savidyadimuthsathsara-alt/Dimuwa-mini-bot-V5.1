@@ -1073,7 +1073,7 @@ async function handleSave(sock, username, msg) {
 // ==========================================
 // GEMINI AI (WITH AUTOMATIC FALLBACK)
 // ==========================================
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
 let geminiClient = null;
 
 function getGeminiClient() {
@@ -1086,15 +1086,22 @@ async function aiChat(query, options = {}) {
   const { mode = "chat", forceModel = null } = options;
   const ai = getGeminiClient();
 
+  const isPaidKey = String(process.env.GEMINI_PAID || "").trim().toLowerCase() === "true";
+
   const modelsToTry = forceModel
     ? [forceModel]
     : mode === "code"
-    ? ["gemini-3.1-pro", "gemini-2.5-pro", "gemini-2.5-flash"]
-    : ["gemini-3.8-flash", "gemini-2.5-flash"];
+    ? isPaidKey
+      ? ["gemini-4-carbon", "gemini-4-hydrogen", "gemini-3.8-flash"]
+      : ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    : isPaidKey
+    ? ["gemini-4-hydrogen", "gemini-4-neon", "gemini-3.8-flash"]
+    : ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
 
   const config = {
-    temperature: mode === "code" ? 0.3 : 0.7,
-    maxOutputTokens: 2048,
+    thinkingConfig: {
+      thinkingLevel: mode === "code" ? "medium" : "low"
+    },
     systemInstruction:
       mode === "code"
         ? "You are an expert coding assistant. Provide concise answers with working code examples. Always wrap code in triple backticks with the language name."
