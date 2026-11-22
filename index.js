@@ -124,7 +124,7 @@ const settingsDB = readJson(SETTINGS_FILE, {});
 const statsDB = readJson(STATS_FILE, {});
 
 // ==========================================
-// EXPRESS & SESSION SETUP
+// EXPRESS & SESSION SETUP (FIXED)
 // ==========================================
 const app = express();
 app.set("trust proxy", true);
@@ -231,19 +231,6 @@ function botsForAccount(email) {
     }));
 }
 
-function assertBotAccess(req, username, { requireExisting = false } = {}) {
-  const clean = cleanUsername(username);
-  const email = String(req.user.email).toLowerCase();
-  const existing = botOwnersDB[clean];
-  if (requireExisting && !existing && email !== ADMIN_EMAIL) {
-    throw Object.assign(new Error("Bot session not found for this account."), { status: 404 });
-  }
-  if (existing && existing.email !== email && email !== ADMIN_EMAIL) {
-    throw Object.assign(new Error("That bot username belongs to another account."), { status: 403 });
-  }
-  return clean;
-}
-
 function claimBotForUser(username, req) {
   const clean = cleanUsername(username);
   const email = String(req.user.email).toLowerCase();
@@ -273,7 +260,7 @@ function claimBotForUser(username, req) {
 }
 
 // ==========================================
-// AUTH ROUTES
+// AUTH ROUTES (FIXED WITH req.session.save)
 // ==========================================
 app.get("/auth/status", (req, res) => {
   const email = getSessionUserEmail(req);
@@ -464,6 +451,109 @@ app.post("/api/admin/accounts/:email/unblock", requireAuth, requireAdmin, (req, 
   res.json({ ok: true });
 });
 
+// ==========================================
+// FRONTEND BOT API ROUTES (HTML එකට)
+// ==========================================
+app.get("/get-pairing-code", requireAuth, async (req, res) => {
+  try {
+    const username = req.query.username;
+    const phone = req.query.phone;
+    if (!username || !phone) return res.status(400).json({ error: "Username and phone required" });
+
+    const clean = claimBotForUser(username, req);
+    const sock = await startBot(clean);
+
+    if (isConnected(sock)) return res.json({ ok: true, code: "ALREADY_CONNECTED", message: "Bot is already connected." });
+
+    sock.__pendingPairingPhone = phone;
+    sock.__pairingCodeResult = null;
+    sock.__pairingError = null;
+
+    let attempts = 0;
+    const interval = setInterval(() => {
+      attempts++;
+      if (sock.__pairingCodeResult) {
+        clearInterval(interval);
+        res.json({ ok: true, code: sock.__pairingCodeResult });
+      } else if (sock.__pairingError) {
+        clearInterval(interval);
+        res.status(400).json({ error: sock.__pairingError });
+      } else if (attempts >= 15) {
+        clearInterval(interval);
+        res.status(408).json({ error: "Timeout. Please try again." });
+      }
+    }, 1000);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/qr", requireAuth, async (req, res) => {
+  try {
+    const username = req.query.username;
+    if (!username) return res.status(400).json({ error: "Username required" });
+
+    const clean = claimBotForUser(username, req);
+    const sock = await startBot(clean);
+
+    if (isConnected(sock)) return res.json({ ok: true, connected: true });
+
+    let attempts = 0;
+    const interval = setInterval(() => {
+      attempts++;
+      const qr = qrStore.get(clean);
+      if (qr) {
+        clearInterval(interval);
+        res.json({ ok: true, qr });
+      } else if (attempts >= 15) {
+        clearInterval(interval);
+        res.status(408).json({ error: "QR Code generation timed out." });
+      }
+    }, 1000);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/details", requireAuth, async (req, res) => {
+  try {
+    const username = cleanUsername(req.query.username);
+    const sock = bots.get(username);
+    if (!sock) return res.json({ ok: true, bot: { connected: false, username } });
+    const isConn = isConnected(sock);
+    res.json({ ok: true, bot: { connected: isConn, status: isConn ? "connected" : "offline", username, phone: jidNumber(getOwnerJid(sock)), pushName: sock.user?.name, jid: sock.user?.id, connectedAt: getStats(username).connectedAt } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/stats", requireAuth, async (req, res) => {
+  try {
+    const username = cleanUsername(req.query.username);
+    const stats = getStats(username);
+    const uptime = stats.connectedAt ? Math.floor((Date.now() - stats.connectedAt) / 1000) : 0;
+    res.json({ ok: true, stats: { ...stats, uptime } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get("/settings", requireAuth, async (req, res) => {
+  try { res.json({ ok: true, settings: getSettings(req.query.username) }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/logout", requireAuth, async (req, res) => {
+  try {
+    const username = cleanUsername(req.query.username);
+    const sock = bots.get(username);
+    if (sock) { await sock.logout(); bots.delete(username); }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post("/unlink", requireAuth, async (req, res) => {
+  try {
+    const username = cleanUsername(req.query.username);
+    const sock = bots.get(username);
+    if (sock) { await sock.logout(); bots.delete(username); }
+    try { fs.rmSync(sessionPath(username), { recursive: true, force: true }); } catch {}
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Serve ONLY index.html (NEVER expose __dirname / data / index.js)
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
@@ -532,7 +622,7 @@ const MAX_MESSAGE_CACHE = 3000;
 const CACHE_TTL = 2 * 60 * 60 * 1000;
 
 // ==========================================
-// VIEW-ONCE MEDIA CACHE & OWNER ALERTS
+// VIEW-ONCE MEDIA CACHE & ERROR ALERTS (FIXED)
 // ==========================================
 const viewOnceMediaCache = new Map();
 const viewOnceInFlight = new Map();
@@ -542,45 +632,42 @@ const errorCooldowns = new Map();
 function getViewOnceCache(id) {
   if (!id) return null;
   const v = viewOnceMediaCache.get(id);
-  if (!v) return null;
-  if (Date.now() - (v.cachedAt || 0) > VO_CACHE_TTL) {
+  if (!v || Date.now() - v.cachedAt > VO_CACHE_TTL) {
     viewOnceMediaCache.delete(id);
     return null;
   }
   return v;
 }
-
 function setViewOnceCache(id, media) {
   if (!id) return;
   viewOnceMediaCache.set(id, { ...media, cachedAt: Date.now() });
-  if (viewOnceMediaCache.size > 1000) {
-    const first = viewOnceMediaCache.keys().next().value;
-    if (first) viewOnceMediaCache.delete(first);
-  }
+  if (viewOnceMediaCache.size > 1000) viewOnceMediaCache.delete(viewOnceMediaCache.keys().next().value);
 }
-
 async function cacheViewOnceMedia(sock, msg) {
   const id = msg?.key?.id;
   if (!id || getViewOnceCache(id) || viewOnceInFlight.has(id)) return;
-
   const promise = (async () => {
     try {
       if (!isViewOnceMessage(msg)) return;
-      const media = await downloadViewOnceMedia(sock, msg, { useCache: false });
-      logger.info(`[VO cache] saved ${id} (${media.mediaType})`);
-    } catch (e) {
-      logger.warn(`[VO cache] background save failed for ${id}: ${e.message}`);
-    } finally {
-      viewOnceInFlight.delete(id);
-    }
+      await downloadViewOnceMedia(sock, msg, { useCache: false });
+    } catch (e) {} finally { viewOnceInFlight.delete(id); }
   })();
-
   viewOnceInFlight.set(id, promise);
 }
 
-// ==========================================
-// HELPER FUNCTIONS
-// ==========================================
+async function sendOwnerAlert(sock, location, errorMsg) {
+  try {
+    const owner = getOwnerJid(sock);
+    if (!owner) return;
+    const now = Date.now();
+    if (now - (errorCooldowns.get(location) || 0) < 60000) return;
+    errorCooldowns.set(location, now);
+    await sock.sendMessage(owner, {
+      text: `🚨 *BOT ERROR ALERT* 🚨\n\n📍 *Location:* ${location}\n⚠️ *Error:* ${errorMsg}\n🕐 *Time:* ${new Date().toLocaleString()}\n\n_Note: මෙම Error එක අනෙක් අයට පෙනෙන්නට හැර නැත._`
+    });
+  } catch (e) {}
+}
+
 function cleanUsername(u) {
   return String(u || "default").trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60) || "default";
 }
@@ -622,6 +709,9 @@ function incrementStat(u, field, amount = 1) {
   saveStats();
 }
 
+// ==========================================
+// HELPERS & JID FIXES
+// ==========================================
 function isConnected(sock) {
   return !!(sock && sock.user && sock.user.id);
 }
@@ -648,27 +738,6 @@ function getOwnerJid(sock) {
   if (sock.__realOwnerJid) return sock.__realOwnerJid;
   if (!sock.user || !sock.user.id) return null;
   return `${jidNumber(sock.user.id)}@s.whatsapp.net`;
-}
-
-// ==========================================
-// OWNER ALERT SYSTEM (ERROR REPORTING)
-// ==========================================
-async function sendOwnerAlert(sock, location, errorMsg) {
-  try {
-    const owner = getOwnerJid(sock);
-    if (!owner) return;
-    
-    const now = Date.now();
-    const lastSent = errorCooldowns.get(location) || 0;
-    if (now - lastSent < 60000) return; // 1 minute cooldown
-    errorCooldowns.set(location, now);
-
-    const text = `🚨 *BOT ERROR ALERT* 🚨\n\n📍 *Location:* ${location}\n⚠️ *Error:* ${errorMsg}\n🕐 *Time:* ${new Date().toLocaleString()}\n\n_Note: මෙම Error එක අනෙක් අයට පෙනෙන්නට හැර නැත._`;
-    
-    await sock.sendMessage(owner, { text });
-  } catch (e) {
-    logger.error("Failed to send owner alert: " + e.message);
-  }
 }
 
 function isOwner(sock, msg) {
@@ -732,7 +801,7 @@ setInterval(() => {
 }, 5 * 60 * 1000).unref();
 
 // ==========================================
-// LID / PN RESOLUTION HELPERS
+// LID / PN RESOLUTION HELPERS (FIXED)
 // ==========================================
 async function resolveToLid(sock, pnJid) {
   if (!pnJid) return null;
@@ -777,7 +846,7 @@ async function resolveToPn(sock, lidJid) {
 }
 
 // ==========================================
-// STATUS HANDLER
+// STATUS HANDLER (FIXED FOR BAILEYS V7 LID & PN)
 // ==========================================
 async function handleStatus(username, sock, msg) {
   try {
@@ -972,11 +1041,9 @@ function unwrapViewOnce(msg) {
   }
   return null;
 }
-
 function isViewOnceMessage(msg) {
   return !!unwrapViewOnce(msg);
 }
-
 function getMediaInfo(message) {
   if (!message) return null;
   const m = normalizeMessageContent(message) || message;
@@ -991,7 +1058,6 @@ function getMediaInfo(message) {
   if (!map[t]) return null;
   return { type: t, mediaType: map[t], content: m[t] };
 }
-
 function getQuotedMessage(msg, sock = null) {
   if (!msg?.message) return null;
   const m = unwrapMessageContent(normalizeMessageContent(msg.message) || msg.message);
@@ -1011,7 +1077,6 @@ function getQuotedMessage(msg, sock = null) {
     message: c.quotedMessage
   };
 }
-
 function buildDownloadMessage(message) {
   const m = normalizeMessageContent(message.message) || message.message || {};
   const t = getContentType(m);
@@ -1022,7 +1087,6 @@ function buildDownloadMessage(message) {
   if (content?.url) key.url = content.url;
   return { key, message: message.message };
 }
-
 async function downloadWhatsAppMedia(sock, message) {
   const info = getMediaInfo(message.message);
   if (!info) throw new Error("Unsupported media.");
@@ -1037,19 +1101,19 @@ async function downloadWhatsAppMedia(sock, message) {
   return { buffer, ...info };
 }
 
+// ==========================================
+// DOWNLOAD VIEW ONCE (FIXED WITH CACHE)
+// ==========================================
 async function downloadViewOnceMedia(sock, msg, { useCache = true } = {}) {
   const id = msg?.key?.id;
 
   if (useCache) {
     const cached = getViewOnceCache(id);
-    if (cached) {
-      logger.info(`[VO] cache hit ${id}`);
-      return cached;
-    }
+    if (cached) return cached;
   }
 
   const vo = unwrapViewOnce(msg);
-  if (!vo) throw new Error("මෙය View-Once පණිවිඩයක් නොවේ.");
+  if (!vo) throw new Error("Not a supported view-once image/video/audio message.");
 
   const mediaNode = { ...vo.content };
   delete mediaNode.viewOnce;
@@ -1063,23 +1127,17 @@ async function downloadViewOnceMedia(sock, msg, { useCache = true } = {}) {
     message: { [vo.type]: mediaNode }
   };
 
-  let buffer;
-  try {
-    buffer = await downloadMediaMessage(
-      downloadMessage,
-      "buffer",
-      {},
-      { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
-    );
-  } catch (err) {
-    throw new Error(`Download failed: ${err.message}`);
-  }
+  const buffer = await downloadMediaMessage(
+    downloadMessage,
+    "buffer",
+    {},
+    { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
+  );
 
-  if (!buffer?.length) throw new Error("හිස් ෆයිල් එකක් ලැබුණි (Empty buffer).");
-  
+  if (!buffer?.length) throw new Error("Empty view-once media buffer.");
   const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
   const result = { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
-
+  
   setViewOnceCache(id, result);
   return result;
 }
@@ -1116,23 +1174,22 @@ function canProcessMessage(sock, username, msg) {
   return true;
 }
 
-// ==========================================
-// VIEW ONCE & SAVE COMMAND
-// ==========================================
 async function handleAutoSaveViewOnce(username, sock, msg) {
   try {
     const s = getSettings(username);
     if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg)) return false;
-    if (isOwner(sock, msg)) return false;
 
     const owner = getOwnerJid(sock);
     if (!owner) return false;
 
+    if (isOwner(sock, msg)) return false;
     const sender = msg.key?.participantAlt || msg.key?.participant || msg.key?.remoteJid;
+
     const media = await downloadViewOnceMedia(sock, msg);
-    
     const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.5`;
+
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
+    logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
     return true;
   } catch (e) {
     logger.error("AutoSave VV Error: " + e.message);
@@ -1141,6 +1198,9 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
   }
 }
 
+// ==========================================
+// VIEW ONCE & SAVE COMMAND (ERRORS SENT TO OWNER ONLY)
+// ==========================================
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg, sock);
   if (!q) return;
@@ -1149,12 +1209,10 @@ async function handleViewOnce(sock, username, msg) {
   try {
     const media = await downloadViewOnceMedia(sock, q);
     const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
-    if (!target) throw new Error("Target JID not found");
-    
+    if (!target) return;
     await sendWhatsAppMedia(sock, target, media);
   } catch (e) {
     logger.error(`ViewOnce save error: ${e.message}`);
-    // ⚠️ Error එක අනිත් අයට නොපෙන්වා Owner ට පමණක් යැවීම
     await sendOwnerAlert(sock, "ViewOnce Save Error", e.message);
   }
 }
@@ -1175,9 +1233,9 @@ async function handleSave(sock, username, msg) {
 }
 
 // ==========================================
-// GEMINI AI & HELPERS
+// GEMINI AI (WITH AUTOMATIC FALLBACK)
 // ==========================================
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
 let geminiClient = null;
 
 function getGeminiClient() {
@@ -1190,15 +1248,22 @@ async function aiChat(query, options = {}) {
   const { mode = "chat", forceModel = null } = options;
   const ai = getGeminiClient();
 
+  const isPaidKey = String(process.env.GEMINI_PAID || "").trim().toLowerCase() === "true";
+
   const modelsToTry = forceModel
     ? [forceModel]
     : mode === "code"
-    ? ["gemini-3.1-pro", "gemini-2.5-pro", "gemini-2.5-flash"]
-    : ["gemini-3.8-flash", "gemini-2.5-flash"];
+    ? isPaidKey
+      ? ["gemini-4-carbon", "gemini-4-hydrogen", "gemini-3.8-flash"]
+      : ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    : isPaidKey
+    ? ["gemini-4-hydrogen", "gemini-4-neon", "gemini-3.8-flash"]
+    : ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
 
   const config = {
-    temperature: mode === "code" ? 0.3 : 0.7,
-    maxOutputTokens: 2048,
+    thinkingConfig: {
+      thinkingLevel: mode === "code" ? "medium" : "low"
+    },
     systemInstruction:
       mode === "code"
         ? "You are an expert coding assistant. Provide concise answers with working code examples. Always wrap code in triple backticks with the language name."
@@ -1220,6 +1285,9 @@ async function aiChat(query, options = {}) {
   throw new Error("AI error: " + (lastErr?.message || "Unknown error"));
 }
 
+// ==========================================
+// OTHER COMMAND HELPERS
+// ==========================================
 async function aiImage(prompt) {
   const seed = Math.floor(Math.random() * 1000000);
   const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}`;
@@ -1423,7 +1491,7 @@ async function sendContact(sock, jid, name, phone, quoted) {
 }
 
 // ==========================================
-// SETTINGS & MENUS
+// SETTINGS & MENUS (FULL RESTORED)
 // ==========================================
 function settingsMenu(u) {
   const s = getSettings(u);
@@ -1659,8 +1727,8 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 │ ❖ 📘 𝗙𝗮𝗰𝗲𝗯𝗼𝗼𝗸
 │ ❖ 🎬 𝗬𝗼𝘂𝗧𝘂𝗯𝗲
 ╰───────────────────────────⬣
-💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝗰𝗲𝗯𝗼𝗼𝗸,
-𝘰𝘳 𝘠𝘰𝘶𝘛𝘶𝘣𝘦 𝘜𝘙𝘓 𝘵𝘰 𝘥𝘰𝘸𝘯𝘭𝘰𝘢𝘥 𝘝𝘪𝘥𝘦𝘰,
+💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝘤𝘦𝗯𝗼𝗼𝗸,
+𝘰𝘳 𝘠𝘰𝘶𝗧𝘶𝘣𝘦 𝘜𝘙𝘓 𝘵𝘰 𝘥𝘰𝘸𝘯𝘭𝘰𝘢𝘥 𝘝𝘪𝘥𝘦𝘰,
 𝘈𝘶𝘥𝘪𝘰, 𝘰𝘳 𝘐𝘮𝘢𝘨𝘦𝘴! 🚀`
     }, { quoted: msg });
     return true;
@@ -2903,7 +2971,7 @@ async function handleMessage(username, sock, msg) {
 }
 
 // ==========================================
-// BOT CONNECTION & WELCOME MESSAGE FIX
+// BOT CONNECTION (FIXED WITH ANDROID & WELCOME)
 // ==========================================
 async function startBot(username) {
   const clean = cleanUsername(username);
@@ -2919,8 +2987,7 @@ async function startBot(username) {
     const sock = makeWASocket({
       version,
       auth: state,
-      // ✅ Android Phone ලෙස වෙනස් කර ඇත (View Once සඳහා)
-      browser: Browsers.androidPhone("Chrome"),
+      browser: Browsers.androidPhone("Chrome"), // ✅ View Once සඳහා Android ලෙස වෙනස් කර ඇත
       printQRInTerminal: false,
       logger,
       markOnlineOnConnect: false,
@@ -2966,14 +3033,12 @@ async function startBot(username) {
           }
         }
       }
-      
       if (connection === "open") {
         qrStore.delete(clean);
         pairingStore.delete(clean);
         sock.__qrReady = false;
         getStats(clean).connectedAt = Date.now();
         saveStats();
-        
         const s = getSettings(clean);
         if (s.alwaysOnline !== "ON") {
           await sock.sendPresenceUpdate("unavailable").catch(() => {});
@@ -2990,7 +3055,7 @@ async function startBot(username) {
           sock.__offlinePresenceTimer = null;
         }
 
-        // ✅ Welcome Message Fix: Connection එක ස්ථිර වී තත්පර 5කට පසු යැවීම
+        // ✅ Welcome Message Fix: Connection එක ස්ථිර වී තත්පර 4කට පසු යැවීම
         setTimeout(async () => {
           try {
             const ownerJid = getOwnerJid(sock) || (sock.user && sock.user.id ? `${jidNumber(sock.user.id)}@s.whatsapp.net` : null);
@@ -2998,15 +3063,12 @@ async function startBot(username) {
               const channelId = "0029VbDZDmx4inoi10evlP1M";
               await sock.subscribeToNewsletter(channelId).catch(() => {});
               const welcomeMsg = `👋 *WELCOME TO DIMUWA MINI BOT V5.5* 🤖 👑\n\n🎉 Connected successfully!\n\n👨‍💻 Creator: ${CREATOR_NAME}\n⚙️ Prefix: [ . ]\n\n📢 https://whatsapp.com/channel/${channelId}\n\n💡 Type .menu to start.`;
-              await sock.sendMessage(ownerJid, { text: welcomeMsg });
-              logger.info("✅ Welcome message sent successfully!");
+              await sock.sendMessage(ownerJid, { text: welcomeMsg }).catch(() => {});
             }
-          } catch (e) {
-            logger.error("Welcome message failed: " + e.message);
-          }
-        }, 5000);
+          } catch (e) {}
+        }, 4000);
+
       }
-      
       if (connection === "close") {
         if (sock.__offlinePresenceTimer) {
           clearInterval(sock.__offlinePresenceTimer);
@@ -3023,26 +3085,19 @@ async function startBot(username) {
       const nowSec = Math.floor(Date.now() / 1000);
       for (const m of ev.messages || []) {
         if (!m?.message) continue;
-        
         if (m.key?.remoteJid === "status@broadcast") {
           const msgTs = Number(m.messageTimestamp || nowSec);
           if (ev.type === "notify" || nowSec - msgTs <= 300) {
-            handleStatus(clean, sock, m).catch(e => {
-              sendOwnerAlert(sock, "Status Upsert Error", e.message);
-            });
+            handleStatus(clean, sock, m).catch((e) => sendOwnerAlert(sock, "Status Upsert Error", e.message));
           }
           continue;
         }
-
         if (ev.type === "notify") {
+          // ✅ පණිවිඩය ආපු ගමන් View Once Cache කිරීම
           if (isViewOnceMessage(m)) {
-            cacheViewOnceMedia(sock, m).catch(e => logger.error(`VO Background Cache Error: ${e.message}`));
+            cacheViewOnceMedia(sock, m).catch(() => {});
           }
-          
-          handleMessage(clean, sock, m).catch((e) => {
-            logger.error(`Message Handler Error: ${e.message}`);
-            sendOwnerAlert(sock, "Main Message Handler Error", e.message);
-          });
+          handleMessage(clean, sock, m).catch((e) => sendOwnerAlert(sock, "Message Handler Error", e.message));
         }
       }
     });
@@ -3072,7 +3127,7 @@ async function startBot(username) {
 }
 
 // ==========================================
-// START SERVER
+// SERVER START
 // ==========================================
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
