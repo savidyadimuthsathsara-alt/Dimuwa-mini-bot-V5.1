@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
-    "@whiskeysockets/baileys": "latest",
+    "@whiskeysockets/baileys": "7.0.0-rc14",
     "axios": "^1.7.9",
     "btch-downloader": "^4.0.15",
     "cors": "^2.8.5",
