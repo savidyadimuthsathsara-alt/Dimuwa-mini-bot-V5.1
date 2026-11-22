@@ -36,7 +36,6 @@ const {
   DisconnectReason,
   Browsers,
   downloadMediaMessage,
-  downloadContentFromMessage,
   getContentType,
   normalizeMessageContent,
   fetchLatestWaWebVersion,
@@ -125,7 +124,7 @@ const settingsDB = readJson(SETTINGS_FILE, {});
 const statsDB = readJson(STATS_FILE, {});
 
 // ==========================================
-// EXPRESS & SESSION SETUP (FIXED)
+// EXPRESS & SESSION SETUP
 // ==========================================
 const app = express();
 app.set("trust proxy", true);
@@ -274,7 +273,7 @@ function claimBotForUser(username, req) {
 }
 
 // ==========================================
-// AUTH ROUTES (FIXED WITH req.session.save)
+// AUTH ROUTES
 // ==========================================
 app.get("/auth/status", (req, res) => {
   const email = getSessionUserEmail(req);
@@ -465,7 +464,6 @@ app.post("/api/admin/accounts/:email/unblock", requireAuth, requireAdmin, (req, 
   res.json({ ok: true });
 });
 
-// Serve ONLY index.html (NEVER expose __dirname / data / index.js)
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "index.html"));
 });
@@ -523,7 +521,6 @@ const userXP = new Map();
 const awaitingCustomStatusText = new Map();
 const processedStatusIds = new Map();
 const spamTracker = new Map();
-const pendingDownloads = new Map();
 
 const statusReactList = [
   "❤️", "💚", "💙", "💛", "🤍", "🧡", "💜", "🩷",
@@ -534,6 +531,56 @@ const statusReactList = [
 const MAX_MESSAGE_CACHE = 3000;
 const CACHE_TTL = 2 * 60 * 60 * 1000;
 
+// ==========================================
+// VIEW-ONCE MEDIA CACHE & OWNER ALERTS
+// ==========================================
+const viewOnceMediaCache = new Map();
+const viewOnceInFlight = new Map();
+const VO_CACHE_TTL = 60 * 60 * 1000;
+const errorCooldowns = new Map();
+
+function getViewOnceCache(id) {
+  if (!id) return null;
+  const v = viewOnceMediaCache.get(id);
+  if (!v) return null;
+  if (Date.now() - (v.cachedAt || 0) > VO_CACHE_TTL) {
+    viewOnceMediaCache.delete(id);
+    return null;
+  }
+  return v;
+}
+
+function setViewOnceCache(id, media) {
+  if (!id) return;
+  viewOnceMediaCache.set(id, { ...media, cachedAt: Date.now() });
+  if (viewOnceMediaCache.size > 1000) {
+    const first = viewOnceMediaCache.keys().next().value;
+    if (first) viewOnceMediaCache.delete(first);
+  }
+}
+
+async function cacheViewOnceMedia(sock, msg) {
+  const id = msg?.key?.id;
+  if (!id || getViewOnceCache(id) || viewOnceInFlight.has(id)) return;
+
+  const promise = (async () => {
+    try {
+      if (!isViewOnceMessage(msg)) return;
+      const media = await downloadViewOnceMedia(sock, msg, { useCache: false });
+      logger.info(`[VO cache] saved ${id} (${media.mediaType})`);
+    } catch (e) {
+      logger.warn(`[VO cache] background save failed for ${id}: ${e.message}`);
+    } finally {
+      viewOnceInFlight.delete(id);
+    }
+  })();
+
+  viewOnceInFlight.set(id, promise);
+}
+
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
 function cleanUsername(u) {
   return String(u || "default").trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60) || "default";
 }
@@ -575,9 +622,6 @@ function incrementStat(u, field, amount = 1) {
   saveStats();
 }
 
-// ==========================================
-// HELPERS & JID FIXES
-// ==========================================
 function isConnected(sock) {
   return !!(sock && sock.user && sock.user.id);
 }
@@ -603,9 +647,28 @@ function getOwnerJid(sock) {
   if (!sock) return null;
   if (sock.__realOwnerJid) return sock.__realOwnerJid;
   if (!sock.user || !sock.user.id) return null;
-  const rawId = String(sock.user.id);
-  if (rawId.endsWith("@lid")) return safeNormalizeJid(rawId);
-  return `${jidNumber(rawId)}@s.whatsapp.net`;
+  return `${jidNumber(sock.user.id)}@s.whatsapp.net`;
+}
+
+// ==========================================
+// OWNER ALERT SYSTEM (ERROR REPORTING)
+// ==========================================
+async function sendOwnerAlert(sock, location, errorMsg) {
+  try {
+    const owner = getOwnerJid(sock);
+    if (!owner) return;
+    
+    const now = Date.now();
+    const lastSent = errorCooldowns.get(location) || 0;
+    if (now - lastSent < 60000) return; // 1 minute cooldown
+    errorCooldowns.set(location, now);
+
+    const text = `🚨 *BOT ERROR ALERT* 🚨\n\n📍 *Location:* ${location}\n⚠️ *Error:* ${errorMsg}\n🕐 *Time:* ${new Date().toLocaleString()}\n\n_Note: මෙම Error එක අනෙක් අයට පෙනෙන්නට හැර නැත._`;
+    
+    await sock.sendMessage(owner, { text });
+  } catch (e) {
+    logger.error("Failed to send owner alert: " + e.message);
+  }
 }
 
 function isOwner(sock, msg) {
@@ -620,28 +683,9 @@ function isOwner(sock, msg) {
   return false;
 }
 
-function unwrapOuterMessage(message) {
-  let current = message;
-  for (let i = 0; i < 10 && current; i++) {
-    const next =
-      current.deviceSentMessage?.message ||
-      current.ephemeralMessage?.message ||
-      current.documentWithCaptionMessage?.message ||
-      current.editedMessage?.message?.protocolMessage?.editedMessage ||
-      current.editedMessage?.message ||
-      current.viewOnceMessage?.message ||
-      current.viewOnceMessageV2?.message ||
-      current.viewOnceMessageV2Extension?.message ||
-      current.viewOnceMessageV3?.message;
-    if (!next) break;
-    current = next;
-  }
-  return current || null;
-}
-
 function getMessageText(msg) {
   if (!msg?.message) return "";
-  const m = unwrapOuterMessage(normalizeMessageContent(msg.message) || msg.message) || msg.message;
+  const m = normalizeMessageContent(msg.message) || msg.message;
   return (
     m.conversation ||
     m.extendedTextMessage?.text ||
@@ -676,18 +720,6 @@ function getCachedMessage(k) {
   if (item && Date.now() - item.savedAt <= CACHE_TTL) return item.message;
   return null;
 }
-function findCachedMessageByKey(k) {
-  if (!k?.id) return null;
-  const direct = getCachedMessage(k);
-  if (direct) return direct;
-  const now = Date.now();
-  for (const [, item] of messageCache) {
-    if (now - item.savedAt <= CACHE_TTL && item.message?.key?.id === k.id) {
-      return item.message;
-    }
-  }
-  return null;
-}
 
 setInterval(() => {
   const n = Date.now();
@@ -697,13 +729,10 @@ setInterval(() => {
   for (const [k, ts] of processedStatusIds) {
     if (n - ts > 10 * 60 * 1000) processedStatusIds.delete(k);
   }
-  for (const [k, entry] of pendingDownloads) {
-    if (n - (entry?.createdAt || 0) > 10 * 60 * 1000) pendingDownloads.delete(k);
-  }
 }, 5 * 60 * 1000).unref();
 
 // ==========================================
-// LID / PN RESOLUTION HELPERS (FIXED)
+// LID / PN RESOLUTION HELPERS
 // ==========================================
 async function resolveToLid(sock, pnJid) {
   if (!pnJid) return null;
@@ -748,7 +777,7 @@ async function resolveToPn(sock, lidJid) {
 }
 
 // ==========================================
-// STATUS HANDLER (FIXED FOR BAILEYS V7 LID & PN)
+// STATUS HANDLER
 // ==========================================
 async function handleStatus(username, sock, msg) {
   try {
@@ -816,6 +845,7 @@ async function handleStatus(username, sock, msg) {
           }
         } catch (err) {
           logger.warn(`Status read failed: ${err.message}`);
+          await sendOwnerAlert(sock, "Status Read Fail", err.message);
         }
       }
     }
@@ -889,67 +919,58 @@ async function handleStatus(username, sock, msg) {
 
       if (!reacted && lastError) {
         logger.error("Status react failed completely: " + lastError.message);
+        await sendOwnerAlert(sock, "Status React Fail", lastError.message);
       }
     }
   } catch (err) {
     logger.error("handleStatus error: " + err.message);
+    await sendOwnerAlert(sock, "Status Handler Crash", err.message);
   }
 }
 
 // ==========================================
-// MEDIA & VIEW-ONCE HELPERS (FIXED)
+// MEDIA HELPERS
 // ==========================================
-function normalizeMediaKey(mediaKey) {
-  if (!mediaKey) return mediaKey;
-  if (Buffer.isBuffer(mediaKey) || mediaKey instanceof Uint8Array) return mediaKey;
-  if (typeof mediaKey === "string") return Buffer.from(mediaKey, "base64");
-  if (typeof mediaKey === "object") return Buffer.from(Object.values(mediaKey));
-  return mediaKey;
-}
-
-function extractMediaNode(msg, { requireViewOnce = false } = {}) {
-  if (!msg?.message) return null;
-  let current = msg.message;
-  let wrapped = false;
-
-  for (let i = 0; i < 10 && current; i++) {
-    const voWrapper =
-      current.viewOnceMessage?.message ||
-      current.viewOnceMessageV2?.message ||
-      current.viewOnceMessageV2Extension?.message ||
-      current.viewOnceMessageV3?.message;
-    if (voWrapper) {
-      wrapped = true;
-      current = voWrapper;
-      continue;
-    }
-    const next =
-      current.ephemeralMessage?.message ||
+function unwrapMessageContent(message) {
+  let current = message;
+  for (let i = 0; i < 8 && current; i++) {
+    const wrapper =
       current.documentWithCaptionMessage?.message ||
-      current.deviceSentMessage?.message ||
-      current.editedMessage?.message;
-    if (!next) break;
-    current = next;
+      current.ephemeralMessage?.message ||
+      current.viewOnceMessageV2Extension?.message ||
+      current.viewOnceMessageV2?.message ||
+      current.viewOnceMessageV3?.message ||
+      current.viewOnceMessage?.message;
+    if (!wrapper) break;
+    current = wrapper;
   }
-
-  if (!current) return null;
-
-  const supported = ["imageMessage", "videoMessage", "audioMessage"];
-  let type = getContentType(current);
-  if (!supported.includes(type)) {
-    type = supported.find((k) => current[k]) || null;
-  }
-  const content = type ? current[type] : null;
-  if (!type || !content) return null;
-
-  const isVO = Boolean(content.viewOnce || wrapped);
-  if (requireViewOnce && !isVO) return null;
-
-  return { type, content, innerMessage: current, isViewOnce: isVO };
+  return current || null;
 }
 
 function unwrapViewOnce(msg) {
-  return extractMediaNode(msg, { requireViewOnce: true });
+  if (!msg?.message) return null;
+  const innerMessage = unwrapMessageContent(msg.message);
+  if (!innerMessage) return null;
+
+  const type = getContentType(innerMessage);
+  const content = type ? innerMessage[type] : null;
+  const supported = new Set(["imageMessage", "videoMessage", "audioMessage"]);
+  if (!supported.has(type) || !content) return null;
+
+  const wrapped = Boolean(
+    msg.message.viewOnceMessage ||
+    msg.message.viewOnceMessageV2 ||
+    msg.message.viewOnceMessageV2Extension ||
+    msg.message.viewOnceMessageV3 ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessage ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessageV2 ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessageV2Extension ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessageV3
+  );
+  if (content.viewOnce || wrapped) {
+    return { type, content, innerMessage };
+  }
+  return null;
 }
 
 function isViewOnceMessage(msg) {
@@ -958,7 +979,7 @@ function isViewOnceMessage(msg) {
 
 function getMediaInfo(message) {
   if (!message) return null;
-  const m = unwrapOuterMessage(normalizeMessageContent(message) || message) || message;
+  const m = normalizeMessageContent(message) || message;
   const t = getContentType(m);
   const map = {
     imageMessage: "image",
@@ -973,20 +994,9 @@ function getMediaInfo(message) {
 
 function getQuotedMessage(msg, sock = null) {
   if (!msg?.message) return null;
-  const normalized = normalizeMessageContent(msg.message) || msg.message;
-  const m = unwrapOuterMessage(normalized) || normalized;
+  const m = unwrapMessageContent(normalizeMessageContent(msg.message) || msg.message);
   const t = getContentType(m);
-  let c = m?.[t]?.contextInfo;
-
-  if (!c?.quotedMessage) {
-    for (const val of Object.values(m || {})) {
-      if (val && typeof val === "object" && val.contextInfo?.quotedMessage) {
-        c = val.contextInfo;
-        break;
-      }
-    }
-  }
-
+  const c = m?.[t]?.contextInfo;
   if (!c?.quotedMessage || !c?.stanzaId) return null;
   const rJid = c.remoteJid || msg.key.remoteJid;
   const p = c.participant || rJid;
@@ -1002,18 +1012,12 @@ function getQuotedMessage(msg, sock = null) {
   };
 }
 
-async function streamToBuffer(stream) {
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return Buffer.concat(chunks);
-}
-
 function buildDownloadMessage(message) {
-  const m = unwrapOuterMessage(normalizeMessageContent(message.message) || message.message) || message.message || {};
+  const m = normalizeMessageContent(message.message) || message.message || {};
   const t = getContentType(m);
   const content = t ? m[t] : null;
   const key = { ...(message.key || {}) };
-  if (content?.mediaKey) key.mediaKey = normalizeMediaKey(content.mediaKey);
+  if (content?.mediaKey) key.mediaKey = content.mediaKey;
   if (content?.directPath) key.directPath = content.directPath;
   if (content?.url) key.url = content.url;
   return { key, message: message.message };
@@ -1022,17 +1026,6 @@ function buildDownloadMessage(message) {
 async function downloadWhatsAppMedia(sock, message) {
   const info = getMediaInfo(message.message);
   if (!info) throw new Error("Unsupported media.");
-
-  try {
-    const mediaNode = {
-      ...info.content,
-      mediaKey: normalizeMediaKey(info.content.mediaKey)
-    };
-    const stream = await downloadContentFromMessage(mediaNode, info.mediaType);
-    const buffer = await streamToBuffer(stream);
-    if (buffer?.length) return { buffer, ...info };
-  } catch {}
-
   const dlMsg = buildDownloadMessage(message);
   const buffer = await downloadMediaMessage(
     dlMsg,
@@ -1044,32 +1037,25 @@ async function downloadWhatsAppMedia(sock, message) {
   return { buffer, ...info };
 }
 
-async function downloadViewOnceMedia(sock, msg, { requireViewOnce = true } = {}) {
-  const vo = extractMediaNode(msg, { requireViewOnce });
-  if (!vo) throw new Error("Quoted message තුළ image/video/audio හමු නොවුණි.");
+async function downloadViewOnceMedia(sock, msg, { useCache = true } = {}) {
+  const id = msg?.key?.id;
 
-  const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
-  const mediaType = map[vo.type];
-  const mediaNode = {
-    ...vo.content,
-    mediaKey: normalizeMediaKey(vo.content.mediaKey)
-  };
-  delete mediaNode.viewOnce;
-
-  if (!mediaNode.mediaKey || (!mediaNode.url && !mediaNode.directPath)) {
-    throw new Error(
-      "WhatsApp වෙතින් mediaKey/URL නොලැබුණි (WhatsApp Web/Desktop වලින් reply කිරීම හෝ දැනටමත් open කර තිබීම නිසා විය හැක)."
-    );
+  if (useCache) {
+    const cached = getViewOnceCache(id);
+    if (cached) {
+      logger.info(`[VO] cache hit ${id}`);
+      return cached;
+    }
   }
 
-  try {
-    const stream = await downloadContentFromMessage(mediaNode, mediaType);
-    const buffer = await streamToBuffer(stream);
-    if (buffer?.length) {
-      return { buffer, mediaType, type: vo.type, content: vo.content };
-    }
-  } catch (e) {
-    logger.warn(`[VV DEBUG] downloadContentFromMessage failed: ${e.message}`);
+  const vo = unwrapViewOnce(msg);
+  if (!vo) throw new Error("මෙය View-Once පණිවිඩයක් නොවේ.");
+
+  const mediaNode = { ...vo.content };
+  delete mediaNode.viewOnce;
+
+  if (!mediaNode.mediaKey && !mediaNode.directPath && !mediaNode.url) {
+    throw new Error("mediaKey/URL නොමැත. (ඔබ මෙය වෙනත් උපාංගයකින් විවෘත කර ඇති බව පෙනේ. බොට් ඔන්ලයින් තබා නැවත උත්සාහ කරන්න)");
   }
 
   const downloadMessage = {
@@ -1077,15 +1063,25 @@ async function downloadViewOnceMedia(sock, msg, { requireViewOnce = true } = {})
     message: { [vo.type]: mediaNode }
   };
 
-  const buffer = await downloadMediaMessage(
-    downloadMessage,
-    "buffer",
-    {},
-    { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
-  );
+  let buffer;
+  try {
+    buffer = await downloadMediaMessage(
+      downloadMessage,
+      "buffer",
+      {},
+      { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
+    );
+  } catch (err) {
+    throw new Error(`Download failed: ${err.message}`);
+  }
 
-  if (!buffer?.length) throw new Error("Empty view-once media buffer.");
-  return { buffer, mediaType, type: vo.type, content: vo.content };
+  if (!buffer?.length) throw new Error("හිස් ෆයිල් එකක් ලැබුණි (Empty buffer).");
+  
+  const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
+  const result = { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
+
+  setViewOnceCache(id, result);
+  return result;
 }
 
 async function sendWhatsAppMedia(sock, jid, media) {
@@ -1120,98 +1116,68 @@ function canProcessMessage(sock, username, msg) {
   return true;
 }
 
+// ==========================================
+// VIEW ONCE & SAVE COMMAND
+// ==========================================
 async function handleAutoSaveViewOnce(username, sock, msg) {
   try {
     const s = getSettings(username);
     if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg)) return false;
-
-    let owner = getOwnerJid(sock);
-    if (!owner) return false;
-    if (owner.endsWith("@lid")) owner = (await resolveToPn(sock, owner)) || owner;
-
     if (isOwner(sock, msg)) return false;
+
+    const owner = getOwnerJid(sock);
+    if (!owner) return false;
+
     const sender = msg.key?.participantAlt || msg.key?.participant || msg.key?.remoteJid;
-
-    const media = await downloadViewOnceMedia(sock, msg, { requireViewOnce: true });
+    const media = await downloadViewOnceMedia(sock, msg);
+    
     const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.5`;
-
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
-    logger.info(`✅ View once saved to Inbox from ${jidNumber(sender)}`);
     return true;
   } catch (e) {
     logger.error("AutoSave VV Error: " + e.message);
+    await sendOwnerAlert(sock, "AutoSave ViewOnce Error", e.message);
     return false;
   }
 }
 
-// ==========================================
-// VIEW ONCE & SAVE COMMAND (FIXED)
-// ==========================================
-async function handleViewOnce(sock, username, msg, text = "") {
+async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg, sock);
-  if (!q) {
-    logger.info(`[VV DEBUG] No quoted message for text="${text}"`);
-    return false;
-  }
-
-  // "." හෝ ".වචනයක්" ලෙස reply කළොත් WhatsApp එකෙන් viewOnce flag එක ඉවත් වී තිබුණත් media එක save කරයි
-  const startsWithDot = text.trim().startsWith(".");
-  const requireViewOnce = !startsWithDot;
-
-  const cached = findCachedMessageByKey(q.key);
-  const cachedNode = cached ? extractMediaNode(cached, { requireViewOnce }) : null;
-  const quotedNode = extractMediaNode(q, { requireViewOnce });
-
-  logger.info(
-    `[VV DEBUG] text="${text}" | qKeys=${Object.keys(q.message || {}).join(",")} | cached=${!!cachedNode} | quoted=${!!quotedNode}`
-  );
-
-  const sourceMsg = cachedNode ? cached : quotedNode ? q : null;
-  if (!sourceMsg) return false;
+  if (!q) return;
+  if (!isViewOnceMessage(q)) return;
 
   try {
-    const media = await downloadViewOnceMedia(sock, sourceMsg, { requireViewOnce });
-    let target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
-    if (target && target.endsWith("@lid")) {
-      target = (await resolveToPn(sock, target)) || target;
-    }
-    if (!target) throw new Error("Target JID හමු නොවුණි.");
-
+    const media = await downloadViewOnceMedia(sock, q);
+    const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+    if (!target) throw new Error("Target JID not found");
+    
     await sendWhatsAppMedia(sock, target, media);
-    logger.info(`[VV DEBUG] ✅ Saved ${media.mediaType} -> ${target}`);
-    return true;
   } catch (e) {
-    logger.error(`[VV DEBUG] ❌ ViewOnce save error: ${e.message}`);
-    let owner = getOwnerJid(sock);
-    if (owner && owner.endsWith("@lid")) owner = (await resolveToPn(sock, owner)) || owner;
-    if (owner) {
-      await sock.sendMessage(owner, { text: `⚠️ *ViewOnce Save Failed:*\n${e.message}` }).catch(() => {});
-    }
-    return true;
+    logger.error(`ViewOnce save error: ${e.message}`);
+    // ⚠️ Error එක අනිත් අයට නොපෙන්වා Owner ට පමණක් යැවීම
+    await sendOwnerAlert(sock, "ViewOnce Save Error", e.message);
   }
 }
 
 async function handleSave(sock, username, msg) {
   const q = getQuotedMessage(msg, sock) || msg;
-  const cached = q?.key ? findCachedMessageByKey(q.key) : null;
-  const source = cached || q;
   try {
-    const media = isViewOnceMessage(source)
-      ? await downloadViewOnceMedia(sock, source, { requireViewOnce: true })
-      : await downloadWhatsAppMedia(sock, source);
-    let target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
-    if (target && target.endsWith("@lid")) target = (await resolveToPn(sock, target)) || target;
+    const media = isViewOnceMessage(q)
+      ? await downloadViewOnceMedia(sock, q)
+      : await downloadWhatsAppMedia(sock, q);
+    const target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
   } catch (e) {
     logger.error(`.save error: ${e.message}`);
+    await sendOwnerAlert(sock, "Save Command Error", e.message);
   }
 }
 
 // ==========================================
-// GEMINI AI (WITH AUTOMATIC FALLBACK)
+// GEMINI AI & HELPERS
 // ==========================================
-const GEMINI_API_KEY = String(process.env.GEMINI_API_KEY || "").trim();
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 let geminiClient = null;
 
 function getGeminiClient() {
@@ -1224,22 +1190,15 @@ async function aiChat(query, options = {}) {
   const { mode = "chat", forceModel = null } = options;
   const ai = getGeminiClient();
 
-  const isPaidKey = String(process.env.GEMINI_PAID || "").trim().toLowerCase() === "true";
-
   const modelsToTry = forceModel
     ? [forceModel]
     : mode === "code"
-    ? isPaidKey
-      ? ["gemini-4-carbon", "gemini-4-hydrogen", "gemini-3.8-flash"]
-      : ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
-    : isPaidKey
-    ? ["gemini-4-hydrogen", "gemini-4-neon", "gemini-3.8-flash"]
-    : ["gemini-4-hydrogen", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
+    ? ["gemini-3.1-pro", "gemini-2.5-pro", "gemini-2.5-flash"]
+    : ["gemini-3.8-flash", "gemini-2.5-flash"];
 
   const config = {
-    thinkingConfig: {
-      thinkingLevel: mode === "code" ? "medium" : "low"
-    },
+    temperature: mode === "code" ? 0.3 : 0.7,
+    maxOutputTokens: 2048,
     systemInstruction:
       mode === "code"
         ? "You are an expert coding assistant. Provide concise answers with working code examples. Always wrap code in triple backticks with the language name."
@@ -1261,9 +1220,6 @@ async function aiChat(query, options = {}) {
   throw new Error("AI error: " + (lastErr?.message || "Unknown error"));
 }
 
-// ==========================================
-// OTHER COMMAND HELPERS
-// ==========================================
 async function aiImage(prompt) {
   const seed = Math.floor(Math.random() * 1000000);
   const url = `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true&seed=${seed}`;
@@ -1630,7 +1586,6 @@ function menuText(u) {
 }
 
 async function sendMenu(sock, u, jid, msg) {
-  pendingDownloads.delete(`${cleanUsername(u)}_${jid}`);
   try {
     await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption: menuText(u) }, { quoted: msg });
   } catch {
@@ -1704,7 +1659,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 │ ❖ 📘 𝗙𝗮𝗰𝗲𝗯𝗼𝗼𝗸
 │ ❖ 🎬 𝗬𝗼𝘂𝗧𝘂𝗯𝗲
 ╰───────────────────────────⬣
-💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝗰𝘦𝗯𝗼𝗼𝗸,
+💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝗰𝗲𝗯𝗼𝗼𝗸,
 𝘰𝘳 𝘠𝘰𝘶𝘛𝘶𝘣𝘦 𝘜𝘙𝘓 𝘵𝘰 𝘥𝘰𝘸𝘯𝘭𝘰𝘢𝘥 𝘝𝘪𝘥𝘦𝘰,
 𝘈𝘶𝘥𝘪𝘰, 𝘰𝘳 𝘐𝘮𝘢𝘨𝘦𝘴! 🚀`
     }, { quoted: msg });
@@ -1824,7 +1779,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// DOWNLOADER (FIXED FOR .song & YOUTUBE)
+// DOWNLOADER
 // ==========================================
 function isSupportedUrl(url) {
   return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url);
@@ -1885,26 +1840,6 @@ function findMediaUrlInObject(obj, type) {
     }
   }
   return null;
-}
-
-async function convertBufferToMp3(buffer, inExt = ".webm") {
-  const jobId = crypto.randomBytes(6).toString("hex");
-  const inPath = path.join(MEDIA_DIR, `${jobId}_in${inExt}`);
-  const outPath = path.join(MEDIA_DIR, `${jobId}_out.mp3`);
-  await fsp.writeFile(inPath, buffer);
-  try {
-    await execFileAsync("ffmpeg", ["-y", "-i", inPath, "-vn", "-c:a", "libmp3lame", "-b:a", "128k", outPath], {
-      timeout: 120000
-    });
-    const out = await fsp.readFile(outPath);
-    await fsp.unlink(inPath).catch(() => {});
-    await fsp.unlink(outPath).catch(() => {});
-    return out;
-  } catch (e) {
-    await fsp.unlink(inPath).catch(() => {});
-    await fsp.unlink(outPath).catch(() => {});
-    throw e;
-  }
 }
 
 async function downloadFacebook(url, type) {
@@ -2021,7 +1956,7 @@ async function downloadYouTubeSavetube(url, type) {
             Referer: "https://yt.savetube.me/",
             "User-Agent": "Mozilla/5.0"
           },
-          timeout: 15000
+          timeout: 20000
         }
       );
       const key = infoRes.data?.data?.key;
@@ -2037,7 +1972,7 @@ async function downloadYouTubeSavetube(url, type) {
             Referer: "https://yt.savetube.me/",
             "User-Agent": "Mozilla/5.0"
           },
-          timeout: 25000
+          timeout: 30000
         }
       );
       const dlUrl = dlRes.data?.data?.downloadUrl;
@@ -2052,12 +1987,12 @@ async function downloadYouTubeOceanSaver(url, type) {
     const format = type === "audio" ? "mp3" : "720";
     const initRes = await axios.get(
       `https://p.oceansaver.in/ajax/download.php?format=${format}&url=${encodeURIComponent(url)}&api=dfcb6d76f2f6a9894gjkege8a4ab232222`,
-      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 15000 }
+      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 20000 }
     );
     const id = initRes.data?.id;
     if (!id) return null;
 
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       const prog = await axios.get(
         `https://p.oceansaver.in/ajax/progress.php?id=${encodeURIComponent(id)}`,
@@ -2156,7 +2091,7 @@ async function downloadViaDirectAPIs(url, type) {
 
     for (const apiUrl of ytApis) {
       try {
-        const r = await axios.get(apiUrl, { timeout: 20000 });
+        const r = await axios.get(apiUrl, { timeout: 30000 });
         const dlUrl = findMediaUrlInObject(r.data?.data || r.data?.result || r.data, type);
         if (dlUrl) {
           return { buffer: await fetchMediaBuffer(dlUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
@@ -2223,17 +2158,9 @@ async function downloadSocialMedia(username, url, type) {
   const jobId = crypto.randomBytes(8).toString("hex");
   const outputTemplate = path.join(MEDIA_DIR, `${jobId}.%(ext)s`);
 
-  const formatArgs =
-    type === "audio"
-      ? ["-f", "bestaudio[ext=m4a]/bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "128K"]
-      : ["-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best", "--merge-output-format", "mp4"];
-
-  const cookiesFile = path.join(DATA_DIR, "youtube_cookies.txt");
+  const formatArgs = type === "audio" ? ["-f", "bestaudio/best"] : ["-f", "best[ext=mp4]/best"];
   const extraExtractorArgs = /youtube\.com|youtu\.be/i.test(url)
-    ? [
-        "--extractor-args", "youtube:player_client=android_vr,tv,web_embedded,mweb",
-        ...(fs.existsSync(cookiesFile) ? ["--cookies", cookiesFile] : [])
-      ]
+    ? ["--extractor-args", "youtube:player_client=ios,android,mweb"]
     : [];
 
   const args = [
@@ -2299,41 +2226,14 @@ async function executeDownload(sock, username, msg, url, type) {
     let ext = dlType === "audio" ? ".mp3" : dlType === "image" ? ".jpg" : ".mp4";
     let tempFile = null;
 
-    const isYT = /youtube\.com|youtu\.be/i.test(url);
-    if (isYT) {
-      try {
-        tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
-        ext = path.extname(tempFile).toLowerCase();
-        buffer = await fsp.readFile(tempFile);
-      } catch (ytErr) {
-        logger.warn("yt-dlp failed for YT, trying API fallback: " + ytErr.message);
-        const apiResult = await downloadViaDirectAPIs(url, dlType);
-        if (apiResult && apiResult.buffer) {
-          buffer = apiResult.buffer;
-          ext = apiResult.ext || ext;
-        } else {
-          throw ytErr;
-        }
-      }
+    const apiResult = await downloadViaDirectAPIs(url, dlType);
+    if (apiResult && apiResult.buffer) {
+      buffer = apiResult.buffer;
+      ext = apiResult.ext || ext;
     } else {
-      const apiResult = await downloadViaDirectAPIs(url, dlType);
-      if (apiResult && apiResult.buffer) {
-        buffer = apiResult.buffer;
-        ext = apiResult.ext || ext;
-      } else {
-        tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
-        ext = path.extname(tempFile).toLowerCase();
-        buffer = await fsp.readFile(tempFile);
-      }
-    }
-
-    if (type === "audio" && [".webm", ".opus", ".ogg"].includes(ext)) {
-      try {
-        buffer = await convertBufferToMp3(buffer, ext);
-        ext = ".mp3";
-      } catch (convErr) {
-        logger.warn("MP3 convert failed: " + convErr.message);
-      }
+      tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
+      ext = path.extname(tempFile).toLowerCase();
+      buffer = await fsp.readFile(tempFile);
     }
 
     if (type === "audio" || [".mp3", ".m4a", ".aac", ".webm", ".opus", ".ogg"].includes(ext)) {
@@ -2376,11 +2276,10 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
 
   for (const key of deletedKeys) {
     try {
-      const cached = findCachedMessageByKey(key);
+      const cached = getCachedMessage(key);
       if (!cached) continue;
 
-      let target = s.antiDelTarget === "SAME" ? key.remoteJid : getOwnerJid(sock);
-      if (target && target.endsWith("@lid")) target = (await resolveToPn(sock, target)) || target;
+      const target = s.antiDelTarget === "SAME" ? key.remoteJid : getOwnerJid(sock);
       if (!target) continue;
 
       const t = getMessageText(cached);
@@ -2486,21 +2385,12 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     await sock.sendMessage(jid, { text: "🔍 Searching..." }, { quoted: msg });
     try {
       const search = await yts(argText);
-      const video = search.videos?.[0];
+      const video = search.videos[0];
       if (!video) throw new Error("No results found.");
 
-      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author?.name || "Unknown"}\n⏱ *Duration:* ${video.timestamp || "-"}\n👀 *Views:* ${video.views || "-"}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.5`;
+      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author.name}\n⏱ *Duration:* ${video.timestamp}\n👀 *Views:* ${video.views}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.5`;
 
-      let sent;
-      try {
-        sent = await sock.sendMessage(jid, { image: { url: video.thumbnail }, caption }, { quoted: msg });
-      } catch {
-        sent = await sock.sendMessage(jid, { text: caption }, { quoted: msg });
-      }
-
-      const entry = { url: video.url, kind: "song", createdAt: Date.now() };
-      pendingDownloads.set(`${cleanUsername(username)}_${jid}`, entry);
-      if (sent?.key?.id) pendingDownloads.set(`msg_${sent.key.id}`, entry);
+      await sock.sendMessage(jid, { image: { url: video.thumbnail }, caption }, { quoted: msg });
     } catch (e) {
       await sock.sendMessage(jid, { text: `❌ Search failed: ${e.message}` }, { quoted: msg });
     }
@@ -2803,7 +2693,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
 }
 
 // ==========================================
-// VIEW-ONCE DOT TRIGGER LOGIC (FIXED)
+// VIEW-ONCE DOT TRIGGER LOGIC
 // ==========================================
 const KNOWN_COMMAND_WORDS = new Set([
   "menu", "help", "save", "ping", "alive", "settings", "setting", "dp", "ai", "code",
@@ -2813,16 +2703,16 @@ const KNOWN_COMMAND_WORDS = new Set([
 ]);
 
 function isDotViewOnceTrigger(text, quotedMsg) {
-  if (!text || !quotedMsg) return false;
+  if (!text) return false;
   const t = text.trim();
   if (!t) return false;
-  if (/^\.+$/.test(t)) return true; // ".", "..", "..."
-  if (/^\.\s+\S+/.test(t)) return true; // ". hi", ". save me"
-  if (t.startsWith(".")) {
-    const firstWord = t.slice(1).split(/\s+/)[0].toLowerCase();
-    if (firstWord && !KNOWN_COMMAND_WORDS.has(firstWord)) return true; // ".hi", ".lassanai machan"
+  if (t === ".") return true;
+  if (!quotedMsg) return false;
+  if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true;
+  if (/^\.[^\s.]+$/.test(t)) {
+    const word = t.slice(1).toLowerCase();
+    if (!KNOWN_COMMAND_WORDS.has(word)) return true;
   }
-  if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true; // "hi.", "nice."
   return false;
 }
 
@@ -2907,46 +2797,24 @@ async function handleMessage(username, sock, msg) {
   if (setCode) return await processSettingsCode(sock, username, msg, setCode[1]);
 
   const quoted = getQuotedMessage(msg, sock);
-  const chatPendingKey = `${clean}_${msg.key.remoteJid}`;
-  const isChoice = ["1", "2", "3", "1️⃣", "2️⃣", "3️⃣"].includes(text);
-
-  if (isChoice) {
-    let targetEntry = null;
-    if (quoted?.key?.id && pendingDownloads.has(`msg_${quoted.key.id}`)) {
-      targetEntry = pendingDownloads.get(`msg_${quoted.key.id}`);
-    } else if (quoted) {
-      const qText = getMessageText(quoted);
-      if (
-        qText &&
-        (qText.includes("📥 *DIMUWA DOWNLOADER*") || qText.includes("🎵 *DIMUWA SONG SEARCH*")) &&
-        qText.includes("URL:")
-      ) {
-        const urlMatch = qText.match(/🔗 URL:\s*(https?:\/\/[^\s]+)/) || qText.match(/URL:\s*(https?:\/\/[^\s]+)/);
-        if (urlMatch?.[1]) {
-          targetEntry = {
-            url: urlMatch[1],
-            kind: qText.includes("🎵 *DIMUWA SONG SEARCH*") ? "song" : "social",
-            createdAt: Date.now()
-          };
+  if (quoted) {
+    const qText = getMessageText(quoted);
+    if (
+      qText &&
+      (qText.includes("📥 *DIMUWA DOWNLOADER*") || qText.includes("🎵 *DIMUWA SONG SEARCH*")) &&
+      qText.includes("🔗 URL:")
+    ) {
+      const urlMatch = qText.match(/🔗 URL:\s*(https?:\/\/[^\s]+)/) || qText.match(/URL:\s*(https?:\/\/[^\s]+)/);
+      if (urlMatch && urlMatch[1]) {
+        const url = urlMatch[1];
+        if (qText.includes("🎵 *DIMUWA SONG SEARCH*")) {
+          if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, url, "audio");
+          if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, url, "video");
+        } else {
+          if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, url, "video");
+          if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, url, "audio");
+          if (text === "3" || text === "3️⃣") return await executeDownload(sock, username, msg, url, "image");
         }
-      }
-    } else if (pendingDownloads.has(chatPendingKey)) {
-      const saved = pendingDownloads.get(chatPendingKey);
-      if (Date.now() - saved.createdAt <= 5 * 60 * 1000) {
-        targetEntry = saved;
-      } else {
-        pendingDownloads.delete(chatPendingKey);
-      }
-    }
-
-    if (targetEntry) {
-      if (targetEntry.kind === "song") {
-        if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "audio");
-        if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "video");
-      } else {
-        if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "video");
-        if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "audio");
-        if (text === "3" || text === "3️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "image");
       }
     }
   }
@@ -2989,11 +2857,7 @@ async function handleMessage(username, sock, msg) {
     return await sendMenu(sock, username, msg.key.remoteJid, msg);
   }
 
-  if (isDotViewOnceTrigger(text, quoted)) {
-    const saved = await handleViewOnce(sock, username, msg, text);
-    if (saved) return;
-  }
-
+  if (isDotViewOnceTrigger(text, quoted)) return await handleViewOnce(sock, username, msg);
   if (cmd === ".save") return await handleSave(sock, username, msg);
   if (cmd === ".settings" || cmd === ".setting") {
     return await sock.sendMessage(msg.key.remoteJid, { text: settingsMenu(username) }, { quoted: msg });
@@ -3006,8 +2870,7 @@ async function handleMessage(username, sock, msg) {
     }
     try {
       const ppUrl = await sock.profilePictureUrl(msg.key.remoteJid, "image");
-      let target = getSettings(username).dpTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
-      if (target && target.endsWith("@lid")) target = (await resolveToPn(sock, target)) || target;
+      const target = getSettings(username).dpTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
       await sock.sendMessage(target, { image: { url: ppUrl }, caption: "📸 Profile Picture" });
       if (target !== msg.key.remoteJid) {
         await sock.sendMessage(msg.key.remoteJid, { text: "✅ Profile picture sent to My Inbox." }, { quoted: msg });
@@ -3025,14 +2888,11 @@ async function handleMessage(username, sock, msg) {
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
-      const sent = await sock.sendMessage(
+      await sock.sendMessage(
         msg.key.remoteJid,
         { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.5` },
         { quoted: msg }
       );
-      const entry = { url, kind: "social", createdAt: Date.now() };
-      pendingDownloads.set(chatPendingKey, entry);
-      if (sent?.key?.id) pendingDownloads.set(`msg_${sent.key.id}`, entry);
       return;
     }
   }
@@ -3043,7 +2903,7 @@ async function handleMessage(username, sock, msg) {
 }
 
 // ==========================================
-// BOT CONNECTION
+// BOT CONNECTION & WELCOME MESSAGE FIX
 // ==========================================
 async function startBot(username) {
   const clean = cleanUsername(username);
@@ -3059,7 +2919,8 @@ async function startBot(username) {
     const sock = makeWASocket({
       version,
       auth: state,
-      browser: Browsers.ubuntu("Chrome"),
+      // ✅ Android Phone ලෙස වෙනස් කර ඇත (View Once සඳහා)
+      browser: Browsers.androidPhone("Chrome"),
       printQRInTerminal: false,
       logger,
       markOnlineOnConnect: false,
@@ -3070,7 +2931,7 @@ async function startBot(username) {
       keepAliveIntervalMs: 25000,
       retryRequestDelayMs: 2000,
       getMessage: async (k) => {
-        const cached = findCachedMessageByKey(k);
+        const cached = getCachedMessage(k);
         return cached?.message || cached || undefined;
       }
     });
@@ -3105,12 +2966,14 @@ async function startBot(username) {
           }
         }
       }
+      
       if (connection === "open") {
         qrStore.delete(clean);
         pairingStore.delete(clean);
         sock.__qrReady = false;
         getStats(clean).connectedAt = Date.now();
         saveStats();
+        
         const s = getSettings(clean);
         if (s.alwaysOnline !== "ON") {
           await sock.sendPresenceUpdate("unavailable").catch(() => {});
@@ -3127,17 +2990,23 @@ async function startBot(username) {
           sock.__offlinePresenceTimer = null;
         }
 
-        try {
-          let ownerJid = getOwnerJid(sock);
-          if (ownerJid && ownerJid.endsWith("@lid")) ownerJid = (await resolveToPn(sock, ownerJid)) || ownerJid;
-          const channelId = "0029VbDZDmx4inoi10evlP1M";
-          if (ownerJid) {
-            await sock.subscribeToNewsletter(channelId).catch(() => {});
-            const welcomeMsg = `👋 *WELCOME TO DIMUWA MINI BOT V5.5* 🤖 👑\n\n🎉 Connected successfully!\n\n👨‍💻 Creator: ${CREATOR_NAME}\n⚙️ Prefix: [ . ]\n\n📢 https://whatsapp.com/channel/${channelId}\n\n💡 Type .menu to start.`;
-            await sock.sendMessage(ownerJid, { text: welcomeMsg }).catch(() => {});
+        // ✅ Welcome Message Fix: Connection එක ස්ථිර වී තත්පර 5කට පසු යැවීම
+        setTimeout(async () => {
+          try {
+            const ownerJid = getOwnerJid(sock) || (sock.user && sock.user.id ? `${jidNumber(sock.user.id)}@s.whatsapp.net` : null);
+            if (ownerJid) {
+              const channelId = "0029VbDZDmx4inoi10evlP1M";
+              await sock.subscribeToNewsletter(channelId).catch(() => {});
+              const welcomeMsg = `👋 *WELCOME TO DIMUWA MINI BOT V5.5* 🤖 👑\n\n🎉 Connected successfully!\n\n👨‍💻 Creator: ${CREATOR_NAME}\n⚙️ Prefix: [ . ]\n\n📢 https://whatsapp.com/channel/${channelId}\n\n💡 Type .menu to start.`;
+              await sock.sendMessage(ownerJid, { text: welcomeMsg });
+              logger.info("✅ Welcome message sent successfully!");
+            }
+          } catch (e) {
+            logger.error("Welcome message failed: " + e.message);
           }
-        } catch {}
+        }, 5000);
       }
+      
       if (connection === "close") {
         if (sock.__offlinePresenceTimer) {
           clearInterval(sock.__offlinePresenceTimer);
@@ -3154,19 +3023,26 @@ async function startBot(username) {
       const nowSec = Math.floor(Date.now() / 1000);
       for (const m of ev.messages || []) {
         if (!m?.message) continue;
+        
         if (m.key?.remoteJid === "status@broadcast") {
           const msgTs = Number(m.messageTimestamp || nowSec);
           if (ev.type === "notify" || nowSec - msgTs <= 300) {
-            handleStatus(clean, sock, m).catch((err) =>
-              logger.error("handleStatus error: " + (err?.message || err))
-            );
+            handleStatus(clean, sock, m).catch(e => {
+              sendOwnerAlert(sock, "Status Upsert Error", e.message);
+            });
           }
           continue;
         }
+
         if (ev.type === "notify") {
-          handleMessage(clean, sock, m).catch((err) =>
-            logger.error("handleMessage error: " + (err?.stack || err?.message || err))
-          );
+          if (isViewOnceMessage(m)) {
+            cacheViewOnceMedia(sock, m).catch(e => logger.error(`VO Background Cache Error: ${e.message}`));
+          }
+          
+          handleMessage(clean, sock, m).catch((e) => {
+            logger.error(`Message Handler Error: ${e.message}`);
+            sendOwnerAlert(sock, "Main Message Handler Error", e.message);
+          });
         }
       }
     });
@@ -3196,354 +3072,8 @@ async function startBot(username) {
 }
 
 // ==========================================
-// PAIRING (FIXED IMMEDIATE REQUEST WHEN QR READY)
+// START SERVER
 // ==========================================
-async function getPairingCode(username, phone) {
-  const clean = cleanUsername(username);
-  const number = normalizePhone(phone);
-  if (!number || number.length < 7) throw new Error("Invalid phone number.");
-
-  let sock = bots.get(clean);
-  if (!sock) sock = await startBot(clean);
-
-  if (isConnected(sock)) throw new Error("This bot is already connected.");
-
-  const waitStart = Date.now();
-  while (!sock.__qrReady && Date.now() - waitStart < 30000) {
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  await new Promise((r) => setTimeout(r, 800));
-
-  try {
-    const raw = await sock.requestPairingCode(number);
-    const formatted = String(raw || "")
-      .replace(/[^A-Za-z0-9]/g, "")
-      .match(/.{1,4}/g)
-      ?.join("-");
-    if (!formatted) throw new Error("Empty pairing code returned.");
-    return formatted;
-  } catch (e) {
-    throw new Error("Pairing failed: " + e.message);
-  }
-}
-
-// ==========================================
-// BOT API ROUTES
-// ==========================================
-app.post("/api/bots", requireAuth, (req, res) => {
-  try {
-    const username = String(req.body.username || "").trim();
-    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
-    const clean = claimBotForUser(username, req);
-    res.json({ ok: true, username: clean, bots: botsForAccount(req.user.email) });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
+app.listen(PORT, () => {
+  logger.info(`Server running on port ${PORT}`);
 });
-
-app.get("/api/bots/:username/status", requireAuth, (req, res) => {
-  try {
-    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
-    const sock = bots.get(clean);
-    const connected = isConnected(sock);
-    const meta = botOwnersDB[clean];
-    res.json({
-      ok: true,
-      username: clean,
-      connected,
-      online: connected,
-      expired: Date.now() >= (meta?.expiresAt || 0),
-      expiresAt: meta?.expiresAt || null,
-      createdAt: meta?.createdAt || null,
-      qr: qrStore.get(clean) || null,
-      pairing: pairingStore.get(clean) || null
-    });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/api/bots/:username/qr", requireAuth, async (req, res) => {
-  try {
-    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
-    let sock = bots.get(clean);
-    if (!sock) sock = await startBot(clean);
-
-    if (isConnected(sock)) {
-      return res.json({ ok: false, error: "Bot already connected." });
-    }
-
-    const start = Date.now();
-    while (!qrStore.has(clean) && Date.now() - start < 30000) {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    const qr = qrStore.get(clean);
-    if (!qr) return res.json({ ok: false, error: "QR not available. Please try again." });
-    res.json({ ok: true, qr });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.post("/api/bots/:username/pair", requireAuth, async (req, res) => {
-  try {
-    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
-    const phone = String(req.body.phone || "").trim();
-    if (!phone) return res.status(400).json({ ok: false, error: "Phone number required." });
-    const code = await getPairingCode(clean, phone);
-    res.json({ ok: true, code });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.post("/api/bots/:username/logout", requireAuth, async (req, res) => {
-  try {
-    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
-    const sock = bots.get(clean);
-    if (sock) {
-      try { await sock.logout(); } catch {}
-    }
-    bots.delete(clean);
-    qrStore.delete(clean);
-    pairingStore.delete(clean);
-    try {
-      const authDir = sessionPath(clean);
-      if (fs.existsSync(authDir)) {
-        fs.rmSync(authDir, { recursive: true, force: true });
-      }
-    } catch {}
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/api/bots/:username/settings", requireAuth, (req, res) => {
-  try {
-    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
-    res.json({ ok: true, settings: getSettings(clean) });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.post("/api/bots/:username/settings", requireAuth, (req, res) => {
-  try {
-    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
-    const incoming = req.body?.settings || req.body || {};
-    const current = getSettings(clean);
-    const updated = { ...current, ...incoming, alwaysOnline: "OFF" };
-    saveSettings(clean, updated);
-    res.json({ ok: true, settings: getSettings(clean) });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/api/bots/:username/stats", requireAuth, (req, res) => {
-  try {
-    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
-    res.json({ ok: true, stats: getStats(clean) });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-// ==========================================
-// DASHBOARD COMPATIBILITY ROUTES (FOR index.html)
-// ==========================================
-app.get("/get-pairing-code", requireAuth, async (req, res) => {
-  try {
-    const username = String(req.query.username || "").trim();
-    const phone = String(req.query.phone || "").trim();
-    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
-    if (!phone) return res.status(400).json({ ok: false, error: "Phone number required." });
-
-    const clean = claimBotForUser(username, req);
-    const code = await getPairingCode(clean, phone);
-    pairingStore.set(clean, code);
-    res.json({ ok: true, code });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/qr", requireAuth, async (req, res) => {
-  try {
-    const username = String(req.query.username || "").trim();
-    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
-
-    const clean = claimBotForUser(username, req);
-    let sock = bots.get(clean);
-    if (!sock) sock = await startBot(clean);
-
-    if (isConnected(sock)) {
-      return res.json({ ok: true, connected: true });
-    }
-
-    const start = Date.now();
-    while (!qrStore.has(clean) && !isConnected(sock) && Date.now() - start < 30000) {
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    if (isConnected(sock)) {
-      return res.json({ ok: true, connected: true });
-    }
-    const qr = qrStore.get(clean);
-    if (!qr) return res.status(504).json({ ok: false, error: "QR not available. Please try again." });
-    res.json({ ok: true, connected: false, qr });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/details", requireAuth, (req, res) => {
-  try {
-    const username = String(req.query.username || "").trim();
-    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
-
-    const clean = assertBotAccess(req, username, { requireExisting: false });
-    const sock = bots.get(clean);
-    const connected = isConnected(sock);
-    const st = getStats(clean);
-    const jid = connected ? getOwnerJid(sock) : null;
-
-    res.json({
-      ok: true,
-      bot: {
-        username: clean,
-        connected,
-        status: connected ? "connected" : "offline",
-        phone: jid ? jidNumber(jid) : "-",
-        pushName: connected ? sock.user?.name || "-" : "-",
-        jid: jid || "-",
-        connectedAt: connected ? st.connectedAt || null : null
-      }
-    });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/stats", requireAuth, (req, res) => {
-  try {
-    const username = String(req.query.username || "").trim();
-    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
-
-    const clean = assertBotAccess(req, username, { requireExisting: false });
-    const sock = bots.get(clean);
-    const connected = isConnected(sock);
-    const st = getStats(clean);
-    const uptime = connected && st.connectedAt ? Math.floor((Date.now() - st.connectedAt) / 1000) : 0;
-
-    res.json({
-      ok: true,
-      stats: { ...st, uptime }
-    });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/settings", requireAuth, (req, res) => {
-  try {
-    const username = String(req.query.username || "").trim();
-    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
-
-    const clean = assertBotAccess(req, username, { requireExisting: false });
-    res.json({ ok: true, settings: getSettings(clean) });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-async function handleBotDisconnect(req, res) {
-  try {
-    const username = String(req.query.username || req.body?.username || "").trim();
-    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
-
-    const clean = assertBotAccess(req, username, { requireExisting: false });
-    const sock = bots.get(clean);
-    if (sock) {
-      if (sock.__offlinePresenceTimer) {
-        clearInterval(sock.__offlinePresenceTimer);
-        sock.__offlinePresenceTimer = null;
-      }
-      try { await sock.logout(); } catch {}
-      try { sock.end(); } catch {}
-    }
-    bots.delete(clean);
-    qrStore.delete(clean);
-    pairingStore.delete(clean);
-    getStats(clean).connectedAt = null;
-    saveStats();
-
-    try {
-      const authDir = sessionPath(clean);
-      if (fs.existsSync(authDir)) {
-        fs.rmSync(authDir, { recursive: true, force: true });
-      }
-    } catch {}
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-}
-
-app.post("/logout", requireAuth, handleBotDisconnect);
-app.post("/unlink", requireAuth, handleBotDisconnect);
-
-// ==========================================
-// ERROR HANDLERS & SERVER START
-// ==========================================
-app.use((err, req, res, next) => {
-  logger.error("Express error: " + (err?.stack || err?.message || err));
-  if (!res.headersSent) {
-    res.status(500).json({ ok: false, error: "Internal server error." });
-  }
-});
-
-app.use((req, res) => {
-  res.status(404).json({ ok: false, error: "Not found." });
-});
-
-const server = app.listen(PORT, "0.0.0.0", () => {
-  logger.info(`🚀 DIMUWA MINI BOT V5.5 running on port ${PORT}`);
-  logger.info(`📂 Data dir: ${DATA_DIR}`);
-});
-
-// ==========================================
-// GRACEFUL SHUTDOWN
-// ==========================================
-function shutdown(sig) {
-  logger.info(`Received ${sig}, shutting down...`);
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 10000);
-}
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
-
-// ==========================================
-// AUTO-START EXISTING BOTS ON BOOT
-// ==========================================
-(async () => {
-  try {
-    const entries = Object.keys(botOwnersDB);
-    for (const username of entries) {
-      const meta = botOwnersDB[username];
-      if (!meta || Date.now() >= meta.expiresAt) continue;
-      const authDir = sessionPath(username);
-      try {
-        if (fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0) {
-          startBot(username).catch((e) =>
-            logger.error(`Auto-start ${username} failed: ${e.message}`)
-          );
-        }
-      } catch {}
-    }
-    logger.info(`🔁 Auto-start scan complete (${entries.length} bots found)`);
-  } catch (e) {
-    logger.error("Auto-start error: " + e.message);
-  }
-})();
