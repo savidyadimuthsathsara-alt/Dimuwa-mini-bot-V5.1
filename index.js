@@ -36,6 +36,7 @@ const {
   DisconnectReason,
   Browsers,
   downloadMediaMessage,
+  downloadContentFromMessage,
   getContentType,
   normalizeMessageContent,
   fetchLatestWaWebVersion,
@@ -522,6 +523,7 @@ const userXP = new Map();
 const awaitingCustomStatusText = new Map();
 const processedStatusIds = new Map();
 const spamTracker = new Map();
+const pendingDownloads = new Map();
 
 const statusReactList = [
   "❤️", "💚", "💙", "💛", "🤍", "🧡", "💜", "🩷",
@@ -601,7 +603,9 @@ function getOwnerJid(sock) {
   if (!sock) return null;
   if (sock.__realOwnerJid) return sock.__realOwnerJid;
   if (!sock.user || !sock.user.id) return null;
-  return `${jidNumber(sock.user.id)}@s.whatsapp.net`;
+  const rawId = String(sock.user.id);
+  if (rawId.endsWith("@lid")) return safeNormalizeJid(rawId);
+  return `${jidNumber(rawId)}@s.whatsapp.net`;
 }
 
 function isOwner(sock, msg) {
@@ -616,9 +620,28 @@ function isOwner(sock, msg) {
   return false;
 }
 
+function unwrapOuterMessage(message) {
+  let current = message;
+  for (let i = 0; i < 10 && current; i++) {
+    const next =
+      current.deviceSentMessage?.message ||
+      current.ephemeralMessage?.message ||
+      current.documentWithCaptionMessage?.message ||
+      current.editedMessage?.message?.protocolMessage?.editedMessage ||
+      current.editedMessage?.message ||
+      current.viewOnceMessage?.message ||
+      current.viewOnceMessageV2?.message ||
+      current.viewOnceMessageV2Extension?.message ||
+      current.viewOnceMessageV3?.message;
+    if (!next) break;
+    current = next;
+  }
+  return current || null;
+}
+
 function getMessageText(msg) {
   if (!msg?.message) return "";
-  const m = normalizeMessageContent(msg.message) || msg.message;
+  const m = unwrapOuterMessage(normalizeMessageContent(msg.message) || msg.message) || msg.message;
   return (
     m.conversation ||
     m.extendedTextMessage?.text ||
@@ -653,6 +676,18 @@ function getCachedMessage(k) {
   if (item && Date.now() - item.savedAt <= CACHE_TTL) return item.message;
   return null;
 }
+function findCachedMessageByKey(k) {
+  if (!k?.id) return null;
+  const direct = getCachedMessage(k);
+  if (direct) return direct;
+  const now = Date.now();
+  for (const [, item] of messageCache) {
+    if (now - item.savedAt <= CACHE_TTL && item.message?.key?.id === k.id) {
+      return item.message;
+    }
+  }
+  return null;
+}
 
 setInterval(() => {
   const n = Date.now();
@@ -661,6 +696,9 @@ setInterval(() => {
   }
   for (const [k, ts] of processedStatusIds) {
     if (n - ts > 10 * 60 * 1000) processedStatusIds.delete(k);
+  }
+  for (const [k, entry] of pendingDownloads) {
+    if (n - (entry?.createdAt || 0) > 10 * 60 * 1000) pendingDownloads.delete(k);
   }
 }, 5 * 60 * 1000).unref();
 
@@ -859,55 +897,68 @@ async function handleStatus(username, sock, msg) {
 }
 
 // ==========================================
-// MEDIA HELPERS
+// MEDIA & VIEW-ONCE HELPERS (FIXED)
 // ==========================================
-function unwrapMessageContent(message) {
-  let current = message;
-  for (let i = 0; i < 8 && current; i++) {
-    const wrapper =
-      current.documentWithCaptionMessage?.message ||
-      current.ephemeralMessage?.message ||
-      current.viewOnceMessageV2Extension?.message ||
+function normalizeMediaKey(mediaKey) {
+  if (!mediaKey) return mediaKey;
+  if (Buffer.isBuffer(mediaKey) || mediaKey instanceof Uint8Array) return mediaKey;
+  if (typeof mediaKey === "string") return Buffer.from(mediaKey, "base64");
+  if (typeof mediaKey === "object") return Buffer.from(Object.values(mediaKey));
+  return mediaKey;
+}
+
+function extractMediaNode(msg, { requireViewOnce = false } = {}) {
+  if (!msg?.message) return null;
+  let current = msg.message;
+  let wrapped = false;
+
+  for (let i = 0; i < 10 && current; i++) {
+    const voWrapper =
+      current.viewOnceMessage?.message ||
       current.viewOnceMessageV2?.message ||
-      current.viewOnceMessageV3?.message ||
-      current.viewOnceMessage?.message;
-    if (!wrapper) break;
-    current = wrapper;
+      current.viewOnceMessageV2Extension?.message ||
+      current.viewOnceMessageV3?.message;
+    if (voWrapper) {
+      wrapped = true;
+      current = voWrapper;
+      continue;
+    }
+    const next =
+      current.ephemeralMessage?.message ||
+      current.documentWithCaptionMessage?.message ||
+      current.deviceSentMessage?.message ||
+      current.editedMessage?.message;
+    if (!next) break;
+    current = next;
   }
-  return current || null;
+
+  if (!current) return null;
+
+  const supported = ["imageMessage", "videoMessage", "audioMessage"];
+  let type = getContentType(current);
+  if (!supported.includes(type)) {
+    type = supported.find((k) => current[k]) || null;
+  }
+  const content = type ? current[type] : null;
+  if (!type || !content) return null;
+
+  const isVO = Boolean(content.viewOnce || wrapped);
+  if (requireViewOnce && !isVO) return null;
+
+  return { type, content, innerMessage: current, isViewOnce: isVO };
 }
 
 function unwrapViewOnce(msg) {
-  if (!msg?.message) return null;
-  const innerMessage = unwrapMessageContent(msg.message);
-  if (!innerMessage) return null;
-
-  const type = getContentType(innerMessage);
-  const content = type ? innerMessage[type] : null;
-  const supported = new Set(["imageMessage", "videoMessage", "audioMessage"]);
-  if (!supported.has(type) || !content) return null;
-
-  const wrapped = Boolean(
-    msg.message.viewOnceMessage ||
-    msg.message.viewOnceMessageV2 ||
-    msg.message.viewOnceMessageV2Extension ||
-    msg.message.viewOnceMessageV3 ||
-    msg.message.ephemeralMessage?.message?.viewOnceMessage ||
-    msg.message.ephemeralMessage?.message?.viewOnceMessageV2 ||
-    msg.message.ephemeralMessage?.message?.viewOnceMessageV2Extension ||
-    msg.message.ephemeralMessage?.message?.viewOnceMessageV3
-  );
-  if (content.viewOnce || wrapped) {
-    return { type, content, innerMessage };
-  }
-  return null;
+  return extractMediaNode(msg, { requireViewOnce: true });
 }
+
 function isViewOnceMessage(msg) {
   return !!unwrapViewOnce(msg);
 }
+
 function getMediaInfo(message) {
   if (!message) return null;
-  const m = normalizeMessageContent(message) || message;
+  const m = unwrapOuterMessage(normalizeMessageContent(message) || message) || message;
   const t = getContentType(m);
   const map = {
     imageMessage: "image",
@@ -919,11 +970,23 @@ function getMediaInfo(message) {
   if (!map[t]) return null;
   return { type: t, mediaType: map[t], content: m[t] };
 }
+
 function getQuotedMessage(msg, sock = null) {
   if (!msg?.message) return null;
-  const m = unwrapMessageContent(normalizeMessageContent(msg.message) || msg.message);
+  const normalized = normalizeMessageContent(msg.message) || msg.message;
+  const m = unwrapOuterMessage(normalized) || normalized;
   const t = getContentType(m);
-  const c = m?.[t]?.contextInfo;
+  let c = m?.[t]?.contextInfo;
+
+  if (!c?.quotedMessage) {
+    for (const val of Object.values(m || {})) {
+      if (val && typeof val === "object" && val.contextInfo?.quotedMessage) {
+        c = val.contextInfo;
+        break;
+      }
+    }
+  }
+
   if (!c?.quotedMessage || !c?.stanzaId) return null;
   const rJid = c.remoteJid || msg.key.remoteJid;
   const p = c.participant || rJid;
@@ -938,19 +1001,38 @@ function getQuotedMessage(msg, sock = null) {
     message: c.quotedMessage
   };
 }
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
 function buildDownloadMessage(message) {
-  const m = normalizeMessageContent(message.message) || message.message || {};
+  const m = unwrapOuterMessage(normalizeMessageContent(message.message) || message.message) || message.message || {};
   const t = getContentType(m);
   const content = t ? m[t] : null;
   const key = { ...(message.key || {}) };
-  if (content?.mediaKey) key.mediaKey = content.mediaKey;
+  if (content?.mediaKey) key.mediaKey = normalizeMediaKey(content.mediaKey);
   if (content?.directPath) key.directPath = content.directPath;
   if (content?.url) key.url = content.url;
   return { key, message: message.message };
 }
+
 async function downloadWhatsAppMedia(sock, message) {
   const info = getMediaInfo(message.message);
   if (!info) throw new Error("Unsupported media.");
+
+  try {
+    const mediaNode = {
+      ...info.content,
+      mediaKey: normalizeMediaKey(info.content.mediaKey)
+    };
+    const stream = await downloadContentFromMessage(mediaNode, info.mediaType);
+    const buffer = await streamToBuffer(stream);
+    if (buffer?.length) return { buffer, ...info };
+  } catch {}
+
   const dlMsg = buildDownloadMessage(message);
   const buffer = await downloadMediaMessage(
     dlMsg,
@@ -961,12 +1043,35 @@ async function downloadWhatsAppMedia(sock, message) {
   if (!buffer?.length) throw new Error("Empty media buffer.");
   return { buffer, ...info };
 }
-async function downloadViewOnceMedia(sock, msg) {
-  const vo = unwrapViewOnce(msg);
-  if (!vo) throw new Error("Not a supported view-once image/video/audio message.");
 
-  const mediaNode = { ...vo.content };
+async function downloadViewOnceMedia(sock, msg, { requireViewOnce = true } = {}) {
+  const vo = extractMediaNode(msg, { requireViewOnce });
+  if (!vo) throw new Error("Quoted message තුළ image/video/audio හමු නොවුණි.");
+
+  const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
+  const mediaType = map[vo.type];
+  const mediaNode = {
+    ...vo.content,
+    mediaKey: normalizeMediaKey(vo.content.mediaKey)
+  };
   delete mediaNode.viewOnce;
+
+  if (!mediaNode.mediaKey || (!mediaNode.url && !mediaNode.directPath)) {
+    throw new Error(
+      "WhatsApp වෙතින් mediaKey/URL නොලැබුණි (WhatsApp Web/Desktop වලින් reply කිරීම හෝ දැනටමත් open කර තිබීම නිසා විය හැක)."
+    );
+  }
+
+  try {
+    const stream = await downloadContentFromMessage(mediaNode, mediaType);
+    const buffer = await streamToBuffer(stream);
+    if (buffer?.length) {
+      return { buffer, mediaType, type: vo.type, content: vo.content };
+    }
+  } catch (e) {
+    logger.warn(`[VV DEBUG] downloadContentFromMessage failed: ${e.message}`);
+  }
+
   const downloadMessage = {
     key: { ...(msg.key || {}) },
     message: { [vo.type]: mediaNode }
@@ -980,9 +1085,9 @@ async function downloadViewOnceMedia(sock, msg) {
   );
 
   if (!buffer?.length) throw new Error("Empty view-once media buffer.");
-  const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
-  return { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
+  return { buffer, mediaType, type: vo.type, content: vo.content };
 }
+
 async function sendWhatsAppMedia(sock, jid, media) {
   const { buffer, mediaType, content } = media;
   const caption = content?.caption || "";
@@ -1020,13 +1125,14 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
     const s = getSettings(username);
     if (s.autoSaveViewOnce !== "ON" || !isViewOnceMessage(msg)) return false;
 
-    const owner = getOwnerJid(sock);
+    let owner = getOwnerJid(sock);
     if (!owner) return false;
+    if (owner.endsWith("@lid")) owner = (await resolveToPn(sock, owner)) || owner;
 
     if (isOwner(sock, msg)) return false;
     const sender = msg.key?.participantAlt || msg.key?.participant || msg.key?.remoteJid;
 
-    const media = await downloadViewOnceMedia(sock, msg);
+    const media = await downloadViewOnceMedia(sock, msg, { requireViewOnce: true });
     const caption = `🔓 *AUTO-SAVED VIEW ONCE*\n\n👤 From: ${msg.pushName || jidNumber(sender)}\n📱 Number: ${jidNumber(sender)}\n🕐 Time: ${new Date().toLocaleString()}\n\n🤖 DIMUWA MINI BOT V5.5`;
 
     await sendWhatsAppMedia(sock, owner, { ...media, content: { ...media.content, caption } });
@@ -1039,30 +1145,62 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
 }
 
 // ==========================================
-// VIEW ONCE & SAVE COMMAND
+// VIEW ONCE & SAVE COMMAND (FIXED)
 // ==========================================
-async function handleViewOnce(sock, username, msg) {
+async function handleViewOnce(sock, username, msg, text = "") {
   const q = getQuotedMessage(msg, sock);
-  if (!q) return;
-  if (!isViewOnceMessage(q)) return;
+  if (!q) {
+    logger.info(`[VV DEBUG] No quoted message for text="${text}"`);
+    return false;
+  }
+
+  // "." හෝ ".වචනයක්" ලෙස reply කළොත් WhatsApp එකෙන් viewOnce flag එක ඉවත් වී තිබුණත් media එක save කරයි
+  const startsWithDot = text.trim().startsWith(".");
+  const requireViewOnce = !startsWithDot;
+
+  const cached = findCachedMessageByKey(q.key);
+  const cachedNode = cached ? extractMediaNode(cached, { requireViewOnce }) : null;
+  const quotedNode = extractMediaNode(q, { requireViewOnce });
+
+  logger.info(
+    `[VV DEBUG] text="${text}" | qKeys=${Object.keys(q.message || {}).join(",")} | cached=${!!cachedNode} | quoted=${!!quotedNode}`
+  );
+
+  const sourceMsg = cachedNode ? cached : quotedNode ? q : null;
+  if (!sourceMsg) return false;
 
   try {
-    const media = await downloadViewOnceMedia(sock, q);
-    const target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
-    if (!target) return;
+    const media = await downloadViewOnceMedia(sock, sourceMsg, { requireViewOnce });
+    let target = getSettings(username).vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+    if (target && target.endsWith("@lid")) {
+      target = (await resolveToPn(sock, target)) || target;
+    }
+    if (!target) throw new Error("Target JID හමු නොවුණි.");
+
     await sendWhatsAppMedia(sock, target, media);
+    logger.info(`[VV DEBUG] ✅ Saved ${media.mediaType} -> ${target}`);
+    return true;
   } catch (e) {
-    logger.error(`ViewOnce save error: ${e.message}`);
+    logger.error(`[VV DEBUG] ❌ ViewOnce save error: ${e.message}`);
+    let owner = getOwnerJid(sock);
+    if (owner && owner.endsWith("@lid")) owner = (await resolveToPn(sock, owner)) || owner;
+    if (owner) {
+      await sock.sendMessage(owner, { text: `⚠️ *ViewOnce Save Failed:*\n${e.message}` }).catch(() => {});
+    }
+    return true;
   }
 }
 
 async function handleSave(sock, username, msg) {
   const q = getQuotedMessage(msg, sock) || msg;
+  const cached = q?.key ? findCachedMessageByKey(q.key) : null;
+  const source = cached || q;
   try {
-    const media = isViewOnceMessage(q)
-      ? await downloadViewOnceMedia(sock, q)
-      : await downloadWhatsAppMedia(sock, q);
-    const target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+    const media = isViewOnceMessage(source)
+      ? await downloadViewOnceMedia(sock, source, { requireViewOnce: true })
+      : await downloadWhatsAppMedia(sock, source);
+    let target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+    if (target && target.endsWith("@lid")) target = (await resolveToPn(sock, target)) || target;
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
   } catch (e) {
@@ -1492,6 +1630,7 @@ function menuText(u) {
 }
 
 async function sendMenu(sock, u, jid, msg) {
+  pendingDownloads.delete(`${cleanUsername(u)}_${jid}`);
   try {
     await sock.sendMessage(jid, { image: { url: LOGO_URL }, caption: menuText(u) }, { quoted: msg });
   } catch {
@@ -1685,7 +1824,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 }
 
 // ==========================================
-// DOWNLOADER
+// DOWNLOADER (FIXED FOR .song & YOUTUBE)
 // ==========================================
 function isSupportedUrl(url) {
   return /tiktok|youtube|youtu\.be|facebook|fb\./i.test(url);
@@ -1746,6 +1885,26 @@ function findMediaUrlInObject(obj, type) {
     }
   }
   return null;
+}
+
+async function convertBufferToMp3(buffer, inExt = ".webm") {
+  const jobId = crypto.randomBytes(6).toString("hex");
+  const inPath = path.join(MEDIA_DIR, `${jobId}_in${inExt}`);
+  const outPath = path.join(MEDIA_DIR, `${jobId}_out.mp3`);
+  await fsp.writeFile(inPath, buffer);
+  try {
+    await execFileAsync("ffmpeg", ["-y", "-i", inPath, "-vn", "-c:a", "libmp3lame", "-b:a", "128k", outPath], {
+      timeout: 120000
+    });
+    const out = await fsp.readFile(outPath);
+    await fsp.unlink(inPath).catch(() => {});
+    await fsp.unlink(outPath).catch(() => {});
+    return out;
+  } catch (e) {
+    await fsp.unlink(inPath).catch(() => {});
+    await fsp.unlink(outPath).catch(() => {});
+    throw e;
+  }
 }
 
 async function downloadFacebook(url, type) {
@@ -1862,7 +2021,7 @@ async function downloadYouTubeSavetube(url, type) {
             Referer: "https://yt.savetube.me/",
             "User-Agent": "Mozilla/5.0"
           },
-          timeout: 20000
+          timeout: 15000
         }
       );
       const key = infoRes.data?.data?.key;
@@ -1878,7 +2037,7 @@ async function downloadYouTubeSavetube(url, type) {
             Referer: "https://yt.savetube.me/",
             "User-Agent": "Mozilla/5.0"
           },
-          timeout: 30000
+          timeout: 25000
         }
       );
       const dlUrl = dlRes.data?.data?.downloadUrl;
@@ -1893,12 +2052,12 @@ async function downloadYouTubeOceanSaver(url, type) {
     const format = type === "audio" ? "mp3" : "720";
     const initRes = await axios.get(
       `https://p.oceansaver.in/ajax/download.php?format=${format}&url=${encodeURIComponent(url)}&api=dfcb6d76f2f6a9894gjkege8a4ab232222`,
-      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 20000 }
+      { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 15000 }
     );
     const id = initRes.data?.id;
     if (!id) return null;
 
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 12; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       const prog = await axios.get(
         `https://p.oceansaver.in/ajax/progress.php?id=${encodeURIComponent(id)}`,
@@ -1997,7 +2156,7 @@ async function downloadViaDirectAPIs(url, type) {
 
     for (const apiUrl of ytApis) {
       try {
-        const r = await axios.get(apiUrl, { timeout: 30000 });
+        const r = await axios.get(apiUrl, { timeout: 20000 });
         const dlUrl = findMediaUrlInObject(r.data?.data || r.data?.result || r.data, type);
         if (dlUrl) {
           return { buffer: await fetchMediaBuffer(dlUrl), ext: type === "audio" ? ".mp3" : ".mp4" };
@@ -2064,9 +2223,17 @@ async function downloadSocialMedia(username, url, type) {
   const jobId = crypto.randomBytes(8).toString("hex");
   const outputTemplate = path.join(MEDIA_DIR, `${jobId}.%(ext)s`);
 
-  const formatArgs = type === "audio" ? ["-f", "bestaudio/best"] : ["-f", "best[ext=mp4]/best"];
+  const formatArgs =
+    type === "audio"
+      ? ["-f", "bestaudio[ext=m4a]/bestaudio/best", "-x", "--audio-format", "mp3", "--audio-quality", "128K"]
+      : ["-f", "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best", "--merge-output-format", "mp4"];
+
+  const cookiesFile = path.join(DATA_DIR, "youtube_cookies.txt");
   const extraExtractorArgs = /youtube\.com|youtu\.be/i.test(url)
-    ? ["--extractor-args", "youtube:player_client=ios,android,mweb"]
+    ? [
+        "--extractor-args", "youtube:player_client=android_vr,tv,web_embedded,mweb",
+        ...(fs.existsSync(cookiesFile) ? ["--cookies", cookiesFile] : [])
+      ]
     : [];
 
   const args = [
@@ -2132,14 +2299,41 @@ async function executeDownload(sock, username, msg, url, type) {
     let ext = dlType === "audio" ? ".mp3" : dlType === "image" ? ".jpg" : ".mp4";
     let tempFile = null;
 
-    const apiResult = await downloadViaDirectAPIs(url, dlType);
-    if (apiResult && apiResult.buffer) {
-      buffer = apiResult.buffer;
-      ext = apiResult.ext || ext;
+    const isYT = /youtube\.com|youtu\.be/i.test(url);
+    if (isYT) {
+      try {
+        tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
+        ext = path.extname(tempFile).toLowerCase();
+        buffer = await fsp.readFile(tempFile);
+      } catch (ytErr) {
+        logger.warn("yt-dlp failed for YT, trying API fallback: " + ytErr.message);
+        const apiResult = await downloadViaDirectAPIs(url, dlType);
+        if (apiResult && apiResult.buffer) {
+          buffer = apiResult.buffer;
+          ext = apiResult.ext || ext;
+        } else {
+          throw ytErr;
+        }
+      }
     } else {
-      tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
-      ext = path.extname(tempFile).toLowerCase();
-      buffer = await fsp.readFile(tempFile);
+      const apiResult = await downloadViaDirectAPIs(url, dlType);
+      if (apiResult && apiResult.buffer) {
+        buffer = apiResult.buffer;
+        ext = apiResult.ext || ext;
+      } else {
+        tempFile = await downloadSocialMedia(username, url, dlType === "audio" ? "audio" : "video");
+        ext = path.extname(tempFile).toLowerCase();
+        buffer = await fsp.readFile(tempFile);
+      }
+    }
+
+    if (type === "audio" && [".webm", ".opus", ".ogg"].includes(ext)) {
+      try {
+        buffer = await convertBufferToMp3(buffer, ext);
+        ext = ".mp3";
+      } catch (convErr) {
+        logger.warn("MP3 convert failed: " + convErr.message);
+      }
     }
 
     if (type === "audio" || [".mp3", ".m4a", ".aac", ".webm", ".opus", ".ogg"].includes(ext)) {
@@ -2182,10 +2376,11 @@ async function handleDeletedMessages(username, sock, deletedKeys) {
 
   for (const key of deletedKeys) {
     try {
-      const cached = getCachedMessage(key);
+      const cached = findCachedMessageByKey(key);
       if (!cached) continue;
 
-      const target = s.antiDelTarget === "SAME" ? key.remoteJid : getOwnerJid(sock);
+      let target = s.antiDelTarget === "SAME" ? key.remoteJid : getOwnerJid(sock);
+      if (target && target.endsWith("@lid")) target = (await resolveToPn(sock, target)) || target;
       if (!target) continue;
 
       const t = getMessageText(cached);
@@ -2291,12 +2486,21 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
     await sock.sendMessage(jid, { text: "🔍 Searching..." }, { quoted: msg });
     try {
       const search = await yts(argText);
-      const video = search.videos[0];
+      const video = search.videos?.[0];
       if (!video) throw new Error("No results found.");
 
-      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author.name}\n⏱ *Duration:* ${video.timestamp}\n👀 *Views:* ${video.views}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.5`;
+      const caption = `🎵 *DIMUWA SONG SEARCH* 🎵\n\n📌 *Title:* ${video.title}\n👤 *Channel:* ${video.author?.name || "Unknown"}\n⏱ *Duration:* ${video.timestamp || "-"}\n👀 *Views:* ${video.views || "-"}\n\n🔗 URL: ${video.url}\n\n*Reply with a number:*\n\n1️⃣ Audio (MP3)\n2️⃣ Video (MP4)\n\n🤖 DIMUWA MINI BOT V5.5`;
 
-      await sock.sendMessage(jid, { image: { url: video.thumbnail }, caption }, { quoted: msg });
+      let sent;
+      try {
+        sent = await sock.sendMessage(jid, { image: { url: video.thumbnail }, caption }, { quoted: msg });
+      } catch {
+        sent = await sock.sendMessage(jid, { text: caption }, { quoted: msg });
+      }
+
+      const entry = { url: video.url, kind: "song", createdAt: Date.now() };
+      pendingDownloads.set(`${cleanUsername(username)}_${jid}`, entry);
+      if (sent?.key?.id) pendingDownloads.set(`msg_${sent.key.id}`, entry);
     } catch (e) {
       await sock.sendMessage(jid, { text: `❌ Search failed: ${e.message}` }, { quoted: msg });
     }
@@ -2599,7 +2803,7 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
 }
 
 // ==========================================
-// VIEW-ONCE DOT TRIGGER LOGIC
+// VIEW-ONCE DOT TRIGGER LOGIC (FIXED)
 // ==========================================
 const KNOWN_COMMAND_WORDS = new Set([
   "menu", "help", "save", "ping", "alive", "settings", "setting", "dp", "ai", "code",
@@ -2609,16 +2813,16 @@ const KNOWN_COMMAND_WORDS = new Set([
 ]);
 
 function isDotViewOnceTrigger(text, quotedMsg) {
-  if (!text) return false;
+  if (!text || !quotedMsg) return false;
   const t = text.trim();
   if (!t) return false;
-  if (t === ".") return true;
-  if (!quotedMsg) return false;
-  if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true;
-  if (/^\.[^\s.]+$/.test(t)) {
-    const word = t.slice(1).toLowerCase();
-    if (!KNOWN_COMMAND_WORDS.has(word)) return true;
+  if (/^\.+$/.test(t)) return true; // ".", "..", "..."
+  if (/^\.\s+\S+/.test(t)) return true; // ". hi", ". save me"
+  if (t.startsWith(".")) {
+    const firstWord = t.slice(1).split(/\s+/)[0].toLowerCase();
+    if (firstWord && !KNOWN_COMMAND_WORDS.has(firstWord)) return true; // ".hi", ".lassanai machan"
   }
+  if (t.length > 1 && /[^.\s]\.\s*$/.test(t) && !/^\d+\.$/.test(t)) return true; // "hi.", "nice."
   return false;
 }
 
@@ -2703,24 +2907,46 @@ async function handleMessage(username, sock, msg) {
   if (setCode) return await processSettingsCode(sock, username, msg, setCode[1]);
 
   const quoted = getQuotedMessage(msg, sock);
-  if (quoted) {
-    const qText = getMessageText(quoted);
-    if (
-      qText &&
-      (qText.includes("📥 *DIMUWA DOWNLOADER*") || qText.includes("🎵 *DIMUWA SONG SEARCH*")) &&
-      qText.includes("🔗 URL:")
-    ) {
-      const urlMatch = qText.match(/🔗 URL:\s*(https?:\/\/[^\s]+)/) || qText.match(/URL:\s*(https?:\/\/[^\s]+)/);
-      if (urlMatch && urlMatch[1]) {
-        const url = urlMatch[1];
-        if (qText.includes("🎵 *DIMUWA SONG SEARCH*")) {
-          if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, url, "audio");
-          if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, url, "video");
-        } else {
-          if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, url, "video");
-          if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, url, "audio");
-          if (text === "3" || text === "3️⃣") return await executeDownload(sock, username, msg, url, "image");
+  const chatPendingKey = `${clean}_${msg.key.remoteJid}`;
+  const isChoice = ["1", "2", "3", "1️⃣", "2️⃣", "3️⃣"].includes(text);
+
+  if (isChoice) {
+    let targetEntry = null;
+    if (quoted?.key?.id && pendingDownloads.has(`msg_${quoted.key.id}`)) {
+      targetEntry = pendingDownloads.get(`msg_${quoted.key.id}`);
+    } else if (quoted) {
+      const qText = getMessageText(quoted);
+      if (
+        qText &&
+        (qText.includes("📥 *DIMUWA DOWNLOADER*") || qText.includes("🎵 *DIMUWA SONG SEARCH*")) &&
+        qText.includes("URL:")
+      ) {
+        const urlMatch = qText.match(/🔗 URL:\s*(https?:\/\/[^\s]+)/) || qText.match(/URL:\s*(https?:\/\/[^\s]+)/);
+        if (urlMatch?.[1]) {
+          targetEntry = {
+            url: urlMatch[1],
+            kind: qText.includes("🎵 *DIMUWA SONG SEARCH*") ? "song" : "social",
+            createdAt: Date.now()
+          };
         }
+      }
+    } else if (pendingDownloads.has(chatPendingKey)) {
+      const saved = pendingDownloads.get(chatPendingKey);
+      if (Date.now() - saved.createdAt <= 5 * 60 * 1000) {
+        targetEntry = saved;
+      } else {
+        pendingDownloads.delete(chatPendingKey);
+      }
+    }
+
+    if (targetEntry) {
+      if (targetEntry.kind === "song") {
+        if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "audio");
+        if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "video");
+      } else {
+        if (text === "1" || text === "1️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "video");
+        if (text === "2" || text === "2️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "audio");
+        if (text === "3" || text === "3️⃣") return await executeDownload(sock, username, msg, targetEntry.url, "image");
       }
     }
   }
@@ -2763,7 +2989,11 @@ async function handleMessage(username, sock, msg) {
     return await sendMenu(sock, username, msg.key.remoteJid, msg);
   }
 
-  if (isDotViewOnceTrigger(text, quoted)) return await handleViewOnce(sock, username, msg);
+  if (isDotViewOnceTrigger(text, quoted)) {
+    const saved = await handleViewOnce(sock, username, msg, text);
+    if (saved) return;
+  }
+
   if (cmd === ".save") return await handleSave(sock, username, msg);
   if (cmd === ".settings" || cmd === ".setting") {
     return await sock.sendMessage(msg.key.remoteJid, { text: settingsMenu(username) }, { quoted: msg });
@@ -2776,7 +3006,8 @@ async function handleMessage(username, sock, msg) {
     }
     try {
       const ppUrl = await sock.profilePictureUrl(msg.key.remoteJid, "image");
-      const target = getSettings(username).dpTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+      let target = getSettings(username).dpTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+      if (target && target.endsWith("@lid")) target = (await resolveToPn(sock, target)) || target;
       await sock.sendMessage(target, { image: { url: ppUrl }, caption: "📸 Profile Picture" });
       if (target !== msg.key.remoteJid) {
         await sock.sendMessage(msg.key.remoteJid, { text: "✅ Profile picture sent to My Inbox." }, { quoted: msg });
@@ -2794,11 +3025,14 @@ async function handleMessage(username, sock, msg) {
   if (urlMatches) {
     const url = urlMatches[0].replace(/[)>]+$/g, "");
     if (isSupportedUrl(url)) {
-      await sock.sendMessage(
+      const sent = await sock.sendMessage(
         msg.key.remoteJid,
         { text: `📥 *DIMUWA DOWNLOADER*\n\n🔗 URL: ${url}\n\n*Reply with a number:*\n\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Image\n\n🤖 DIMUWA MINI BOT V5.5` },
         { quoted: msg }
       );
+      const entry = { url, kind: "social", createdAt: Date.now() };
+      pendingDownloads.set(chatPendingKey, entry);
+      if (sent?.key?.id) pendingDownloads.set(`msg_${sent.key.id}`, entry);
       return;
     }
   }
@@ -2836,7 +3070,7 @@ async function startBot(username) {
       keepAliveIntervalMs: 25000,
       retryRequestDelayMs: 2000,
       getMessage: async (k) => {
-        const cached = getCachedMessage(k);
+        const cached = findCachedMessageByKey(k);
         return cached?.message || cached || undefined;
       }
     });
@@ -2894,7 +3128,8 @@ async function startBot(username) {
         }
 
         try {
-          const ownerJid = getOwnerJid(sock);
+          let ownerJid = getOwnerJid(sock);
+          if (ownerJid && ownerJid.endsWith("@lid")) ownerJid = (await resolveToPn(sock, ownerJid)) || ownerJid;
           const channelId = "0029VbDZDmx4inoi10evlP1M";
           if (ownerJid) {
             await sock.subscribeToNewsletter(channelId).catch(() => {});
@@ -2922,12 +3157,16 @@ async function startBot(username) {
         if (m.key?.remoteJid === "status@broadcast") {
           const msgTs = Number(m.messageTimestamp || nowSec);
           if (ev.type === "notify" || nowSec - msgTs <= 300) {
-            handleStatus(clean, sock, m).catch(() => {});
+            handleStatus(clean, sock, m).catch((err) =>
+              logger.error("handleStatus error: " + (err?.message || err))
+            );
           }
           continue;
         }
         if (ev.type === "notify") {
-          handleMessage(clean, sock, m).catch(() => {});
+          handleMessage(clean, sock, m).catch((err) =>
+            logger.error("handleMessage error: " + (err?.stack || err?.message || err))
+          );
         }
       }
     });
@@ -2969,13 +3208,11 @@ async function getPairingCode(username, phone) {
 
   if (isConnected(sock)) throw new Error("This bot is already connected.");
 
-  // Wait for QR readiness (socket needs to be open before pairing)
   const waitStart = Date.now();
   while (!sock.__qrReady && Date.now() - waitStart < 30000) {
     await new Promise((r) => setTimeout(r, 500));
   }
 
-  // Small stabilization delay
   await new Promise((r) => setTimeout(r, 800));
 
   try {
@@ -3113,6 +3350,7 @@ app.get("/api/bots/:username/stats", requireAuth, (req, res) => {
     res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 });
+
 // ==========================================
 // DASHBOARD COMPATIBILITY ROUTES (FOR index.html)
 // ==========================================
