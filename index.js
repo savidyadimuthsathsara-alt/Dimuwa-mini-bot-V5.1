@@ -718,7 +718,6 @@ async function handleStatus(username, sock, msg) {
     if (s.botPower !== "ON") return;
     if (!msg?.key || !msg.message || msg.key.fromMe) return;
 
-    // Actual status content check (skip protocol / reaction / senderKey only)
     const innerMsg = normalizeMessageContent(msg.message) || msg.message;
     const contentType = getContentType(innerMsg);
     if (
@@ -730,12 +729,10 @@ async function handleStatus(username, sock, msg) {
       return;
     }
 
-    // Deduplicate same status
     const dedupeKey = `${cleanUsername(username)}_${msg.key.id}`;
     if (processedStatusIds.has(dedupeKey)) return;
     processedStatusIds.set(dedupeKey, Date.now());
 
-    // Original participant & alternate JID (Baileys v7 uses participantAlt)
     const rawParticipant = msg.key.participant || msg.participant || null;
     const altParticipant = msg.key.participantAlt || msg.key.participantPn || null;
     if (!rawParticipant || rawParticipant === "status@broadcast") return;
@@ -757,7 +754,6 @@ async function handleStatus(username, sock, msg) {
       if (normAlt.endsWith("@lid")) lidParticipant = normAlt;
     }
 
-    // Owner self-status check (checks BOTH PN and LID)
     const botPn = sock.user?.id ? safeNormalizeJid(sock.user.id) : getOwnerJid(sock);
     const botLid = sock.user?.lid ? safeNormalizeJid(sock.user.lid) : null;
 
@@ -771,7 +767,6 @@ async function handleStatus(username, sock, msg) {
       fromMe: false
     };
 
-    // ---- (A) STATUS READ ----
     if (s.statusRead === "ON") {
       try {
         await sock.readMessages([statusKey]);
@@ -787,9 +782,7 @@ async function handleStatus(username, sock, msg) {
       }
     }
 
-    // ---- (B) STATUS REACT ----
     if (s.statusReact !== "OFF") {
-      // Short delay after reading so WhatsApp accepts the reaction reliably
       await new Promise((r) => setTimeout(r, 1200));
 
       let reactText = "💚";
@@ -801,7 +794,6 @@ async function handleStatus(username, sock, msg) {
 
       const keyIsLid = String(statusKey.participant || "").endsWith("@lid");
 
-      // Match addressing mode: LID+LID or PN+PN (never inject fake JIDs)
       const attempts = [];
       if (keyIsLid) {
         if (lidParticipant) {
@@ -869,20 +861,45 @@ async function handleStatus(username, sock, msg) {
 // ==========================================
 // MEDIA HELPERS
 // ==========================================
+function unwrapMessageContent(message) {
+  let current = message;
+  for (let i = 0; i < 8 && current; i++) {
+    const wrapper =
+      current.documentWithCaptionMessage?.message ||
+      current.ephemeralMessage?.message ||
+      current.viewOnceMessageV2Extension?.message ||
+      current.viewOnceMessageV2?.message ||
+      current.viewOnceMessageV3?.message ||
+      current.viewOnceMessage?.message;
+    if (!wrapper) break;
+    current = wrapper;
+  }
+  return current || null;
+}
+
 function unwrapViewOnce(msg) {
   if (!msg?.message) return null;
-  let m = msg.message;
-  if (m.documentWithCaptionMessage) m = m.documentWithCaptionMessage.message;
-  if (m.ephemeralMessage) m = m.ephemeralMessage.message;
-  if (m.viewOnceMessageV2Extension) m = m.viewOnceMessageV2Extension.message;
-  if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
-  if (m.viewOnceMessage) m = m.viewOnceMessage.message;
-  if (m.viewOnceMessageV3) m = m.viewOnceMessageV3.message;
-  if (m.ptvMessage) m = m.ptvMessage;
+  const innerMessage = unwrapMessageContent(msg.message);
+  if (!innerMessage) return null;
 
-  const it = getContentType(m);
-  if (!it) return null;
-  if (m[it]?.viewOnce) return { type: it, content: m[it], innerMessage: m };
+  const type = getContentType(innerMessage);
+  const content = type ? innerMessage[type] : null;
+  const supported = new Set(["imageMessage", "videoMessage", "audioMessage"]);
+  if (!supported.has(type) || !content) return null;
+
+  const wrapped = Boolean(
+    msg.message.viewOnceMessage ||
+    msg.message.viewOnceMessageV2 ||
+    msg.message.viewOnceMessageV2Extension ||
+    msg.message.viewOnceMessageV3 ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessage ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessageV2 ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessageV2Extension ||
+    msg.message.ephemeralMessage?.message?.viewOnceMessageV3
+  );
+  if (content.viewOnce || wrapped) {
+    return { type, content, innerMessage };
+  }
   return null;
 }
 function isViewOnceMessage(msg) {
@@ -904,9 +921,9 @@ function getMediaInfo(message) {
 }
 function getQuotedMessage(msg, sock = null) {
   if (!msg?.message) return null;
-  const m = normalizeMessageContent(msg.message) || msg.message;
+  const m = unwrapMessageContent(normalizeMessageContent(msg.message) || msg.message);
   const t = getContentType(m);
-  const c = m[t]?.contextInfo;
+  const c = m?.[t]?.contextInfo;
   if (!c?.quotedMessage || !c?.stanzaId) return null;
   const rJid = c.remoteJid || msg.key.remoteJid;
   const p = c.participant || rJid;
@@ -946,25 +963,23 @@ async function downloadWhatsAppMedia(sock, message) {
 }
 async function downloadViewOnceMedia(sock, msg) {
   const vo = unwrapViewOnce(msg);
-  if (!vo) throw new Error("Not view-once.");
+  if (!vo) throw new Error("Not a supported view-once image/video/audio message.");
 
-  const content = vo.content;
-  const innerMsg = { key: msg.key, message: msg.message };
-
-  if (!content.mediaKey) {
-    const m = normalizeMessageContent(msg.message) || msg.message;
-    const t = getContentType(m);
-    if (m[t]?.mediaKey) content.mediaKey = m[t].mediaKey;
-  }
+  const mediaNode = { ...vo.content };
+  delete mediaNode.viewOnce;
+  const downloadMessage = {
+    key: { ...(msg.key || {}) },
+    message: { [vo.type]: mediaNode }
+  };
 
   const buffer = await downloadMediaMessage(
-    innerMsg,
+    downloadMessage,
     "buffer",
     {},
     { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
   );
 
-  if (!buffer?.length) throw new Error("Empty view-once buffer.");
+  if (!buffer?.length) throw new Error("Empty view-once media buffer.");
   const map = { imageMessage: "image", videoMessage: "video", audioMessage: "audio" };
   return { buffer, mediaType: map[vo.type], type: vo.type, content: vo.content };
 }
@@ -1543,7 +1558,7 @@ async function handleMenuNumber(sock, username, jid, num, msg) {
 │ ❖ 📘 𝗙𝗮𝗰𝗲𝗯𝗼𝗼𝗸
 │ ❖ 🎬 𝗬𝗼𝘂𝗧𝘂𝗯𝗲
 ╰───────────────────────────⬣
-💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝗰𝗲𝗯𝗼𝗼𝗸,
+💡 𝘚𝘪𝘮𝘱𝘭𝘺 𝘴𝘦𝘯𝘥 𝘢𝘯𝘺 𝘛𝘪𝘬𝘛𝘰𝘬, 𝘍𝘢𝗰𝘦𝗯𝗼𝗼𝗸,
 𝘰𝘳 𝘠𝘰𝘶𝘛𝘶𝘣𝘦 𝘜𝘙𝘓 𝘵𝘰 𝘥𝘰𝘸𝘯𝘭𝘰𝘢𝘥 𝘝𝘪𝘥𝘦𝘰,
 𝘈𝘶𝘥𝘪𝘰, 𝘰𝘳 𝘐𝘮𝘢𝘨𝘦𝘴! 🚀`
     }, { quoted: msg });
@@ -2204,7 +2219,6 @@ async function handleNewCommands(sock, username, msg, cmd, args, text) {
   const jid = msg.key.remoteJid;
   const argText = text.slice(cmd.length).trim();
 
-  // Fun commands from Menu #5
   if (cmd === ".dice") {
     const roll = Math.floor(Math.random() * 6) + 1;
     await sock.sendMessage(jid, { text: `🎲 *Dice Rolled:* ${roll}` }, { quoted: msg });
@@ -2631,7 +2645,6 @@ async function handleMessage(username, sock, msg) {
   const s = getSettings(username);
   if (s.autoRead === "ON" && !msg.key.fromMe) await sock.readMessages([msg.key]).catch(() => {});
 
-  // Anti-spam check in groups
   if (s.antiSpam === "ON" && isGroupJid(msg.key.remoteJid) && !isOwner(sock, msg)) {
     const sender = msg.key.participant || msg.key.remoteJid;
     const key = `${msg.key.remoteJid}_${sender}`;
@@ -2901,7 +2914,6 @@ async function startBot(username) {
         if (!m?.message) continue;
         if (m.key?.remoteJid === "status@broadcast") {
           const msgTs = Number(m.messageTimestamp || nowSec);
-          // Process fresh statuses (avoid flooding old synced statuses on reconnect)
           if (ev.type === "notify" || nowSec - msgTs <= 300) {
             handleStatus(clean, sock, m).catch(() => {});
           }
@@ -2947,194 +2959,204 @@ async function getPairingCode(username, phone) {
 
   let sock = bots.get(clean);
   if (!sock) sock = await startBot(clean);
-  if (isConnected(sock)) return { connected: true };
-  if (sock.__pairingRequest) return await sock.__pairingRequest;
 
-  sock.__pairingRequest = (async () => {
-    // If socket already emitted QR, request pairing code right away
-    if (sock.__qrReady) {
-      const raw = await sock.requestPairingCode(number);
-      const code = raw.replace(/[^A-Za-z0-9]/g, "").match(/.{1,4}/g).join("-");
-      return { connected: false, code };
-    }
+  if (isConnected(sock)) throw new Error("This bot is already connected.");
 
-    sock.__pendingPairingPhone = number;
-    sock.__pairingCodeResult = null;
-    sock.__pairingError = null;
-    for (let i = 0; i < 40; i++) {
-      if (sock.__pairingCodeResult) return { connected: false, code: sock.__pairingCodeResult };
-      if (sock.__pairingError) throw new Error(sock.__pairingError);
-      if (isConnected(sock)) return { connected: true };
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    sock.__pendingPairingPhone = null;
-    throw new Error("Pairing timed out. Please try again.");
-  })();
+  // Wait for QR readiness (socket needs to be open before pairing)
+  const waitStart = Date.now();
+  while (!sock.__qrReady && Date.now() - waitStart < 30000) {
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  // Small stabilization delay
+  await new Promise((r) => setTimeout(r, 800));
 
   try {
-    return await sock.__pairingRequest;
-  } finally {
-    sock.__pairingRequest = null;
+    const raw = await sock.requestPairingCode(number);
+    const formatted = String(raw || "")
+      .replace(/[^A-Za-z0-9]/g, "")
+      .match(/.{1,4}/g)
+      ?.join("-");
+    if (!formatted) throw new Error("Empty pairing code returned.");
+    return formatted;
+  } catch (e) {
+    throw new Error("Pairing failed: " + e.message);
   }
 }
 
 // ==========================================
-// PROTECTED BOT ROUTES (FIXED)
+// BOT API ROUTES
 // ==========================================
-app.get("/get-pairing-code", requireAuth, async (req, res) => {
+app.post("/api/bots", requireAuth, (req, res) => {
   try {
-    const u = claimBotForUser(req.query.username, req);
-    res.json({ ok: true, ...(await getPairingCode(u, req.query.phone)) });
+    const username = String(req.body.username || "").trim();
+    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
+    const clean = claimBotForUser(username, req);
+    res.json({ ok: true, username: clean, bots: botsForAccount(req.user.email) });
   } catch (e) {
     res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 });
 
-app.get("/qr", requireAuth, async (req, res) => {
+app.get("/api/bots/:username/status", requireAuth, (req, res) => {
   try {
-    const u = claimBotForUser(req.query.username, req);
-    let s = bots.get(u);
-    if (!s && !startingBots.has(u)) {
-      qrStore.delete(u);
-      s = await startBot(u);
-    } else if (!s) {
-      s = await startBot(u);
+    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
+    const sock = bots.get(clean);
+    const connected = isConnected(sock);
+    const meta = botOwnersDB[clean];
+    res.json({
+      ok: true,
+      username: clean,
+      connected,
+      online: connected,
+      expired: Date.now() >= (meta?.expiresAt || 0),
+      expiresAt: meta?.expiresAt || null,
+      createdAt: meta?.createdAt || null,
+      qr: qrStore.get(clean) || null,
+      pairing: pairingStore.get(clean) || null
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/api/bots/:username/qr", requireAuth, async (req, res) => {
+  try {
+    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
+    let sock = bots.get(clean);
+    if (!sock) sock = await startBot(clean);
+
+    if (isConnected(sock)) {
+      return res.json({ ok: false, error: "Bot already connected." });
     }
-    if (isConnected(s)) return res.json({ ok: true, connected: true });
-    let qr = null;
-    for (let i = 0; i < 50; i++) {
-      if (qrStore.has(u)) {
-        qr = qrStore.get(u);
-        break;
-      }
-      if (isConnected(s)) return res.json({ ok: true, connected: true });
+
+    const start = Date.now();
+    while (!qrStore.has(clean) && Date.now() - start < 30000) {
       await new Promise((r) => setTimeout(r, 500));
     }
-    if (!qr) throw new Error("QR not ready. Try again.");
+    const qr = qrStore.get(clean);
+    if (!qr) return res.json({ ok: false, error: "QR not available. Please try again." });
     res.json({ ok: true, qr });
   } catch (e) {
-    res.status(e.status || 503).json({ ok: false, error: e.message });
+    res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 });
 
-app.get("/details", requireAuth, (req, res) => {
+app.post("/api/bots/:username/pair", requireAuth, async (req, res) => {
   try {
-    const u = assertBotAccess(req, req.query.username);
-    const s = bots.get(u);
-    res.json({
-      ok: true,
-      connected: isConnected(s),
-      bot: {
-        status: isConnected(s) ? "CONNECTED" : "OFFLINE",
-        connected: isConnected(s),
-        username: u,
-        phone: jidNumber(s?.user?.id) || "-",
-        pushName: s?.user?.name || "-",
-        jid: s?.user?.id || "-",
-        connectedAt: getStats(u).connectedAt
-      }
-    });
+    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
+    const phone = String(req.body.phone || "").trim();
+    if (!phone) return res.status(400).json({ ok: false, error: "Phone number required." });
+    const code = await getPairingCode(clean, phone);
+    res.json({ ok: true, code });
   } catch (e) {
     res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 });
 
-app.get("/stats", requireAuth, (req, res) => {
+app.post("/api/bots/:username/logout", requireAuth, async (req, res) => {
   try {
-    const u = assertBotAccess(req, req.query.username);
-    const s = getStats(u);
-    res.json({
-      ok: true,
-      stats: {
-        ...s,
-        uptime: s.connectedAt ? Math.max(0, Math.floor((Date.now() - s.connectedAt) / 1000)) : 0
-      }
-    });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.get("/settings", requireAuth, (req, res) => {
-  try {
-    const u = assertBotAccess(req, req.query.username);
-    res.json({ ok: true, settings: getSettings(u) });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.post("/logout", requireAuth, async (req, res) => {
-  try {
-    const u = assertBotAccess(req, req.query.username, { requireExisting: true });
-    const s = bots.get(u);
-    if (s) {
-      try { await s.logout(); } catch {}
-    }
-    bots.delete(u);
-    qrStore.delete(u);
-    await fsp.rm(sessionPath(u), { recursive: true, force: true }).catch(() => {});
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-app.post("/unlink", requireAuth, async (req, res) => {
-  try {
-    const u = assertBotAccess(req, req.query.username, { requireExisting: true });
-    const s = bots.get(u);
-    if (s) {
-      try { await s.logout(); } catch {}
-    }
-    bots.delete(u);
-    qrStore.delete(u);
-    await fsp.rm(sessionPath(u), { recursive: true, force: true }).catch(() => {});
-    res.json({ ok: true });
-  } catch (e) {
-    res.status(e.status || 500).json({ ok: false, error: e.message });
-  }
-});
-
-// Global JSON error handler
-app.use((err, req, res, next) => {
-  logger.error("Express error: " + (err?.stack || err?.message || err));
-  if (res.headersSent) return next(err);
-  res.status(err.status || 500).json({ ok: false, error: err.message || "Internal server error." });
-});
-
-// Stop expired bots periodically
-setInterval(async () => {
-  for (const [username, meta] of Object.entries(botOwnersDB)) {
-    if (Date.now() < meta.expiresAt) continue;
-    const sock = bots.get(username);
+    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
+    const sock = bots.get(clean);
     if (sock) {
       try { await sock.logout(); } catch {}
-      bots.delete(username);
     }
+    bots.delete(clean);
+    qrStore.delete(clean);
+    pairingStore.delete(clean);
+    try {
+      const authDir = sessionPath(clean);
+      if (fs.existsSync(authDir)) {
+        fs.rmSync(authDir, { recursive: true, force: true });
+      }
+    } catch {}
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
   }
-}, 60 * 1000).unref();
+});
+
+app.get("/api/bots/:username/settings", requireAuth, (req, res) => {
+  try {
+    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
+    res.json({ ok: true, settings: getSettings(clean) });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/bots/:username/settings", requireAuth, (req, res) => {
+  try {
+    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
+    const incoming = req.body?.settings || req.body || {};
+    const current = getSettings(clean);
+    const updated = { ...current, ...incoming, alwaysOnline: "OFF" };
+    saveSettings(clean, updated);
+    res.json({ ok: true, settings: getSettings(clean) });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/api/bots/:username/stats", requireAuth, (req, res) => {
+  try {
+    const clean = assertBotAccess(req, req.params.username, { requireExisting: true });
+    res.json({ ok: true, stats: getStats(clean) });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
 
 // ==========================================
-// START SERVER
+// ERROR HANDLERS & SERVER START
 // ==========================================
-app.listen(PORT, "0.0.0.0", () => logger.info(`Server started on ${PORT}`));
+app.use((err, req, res, next) => {
+  logger.error("Express error: " + (err?.stack || err?.message || err));
+  if (!res.headersSent) {
+    res.status(500).json({ ok: false, error: "Internal server error." });
+  }
+});
 
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: "Not found." });
+});
+
+const server = app.listen(PORT, "0.0.0.0", () => {
+  logger.info(`🚀 DIMUWA MINI BOT V5.5 running on port ${PORT}`);
+  logger.info(`📂 Data dir: ${DATA_DIR}`);
+});
+
+// ==========================================
+// GRACEFUL SHUTDOWN
+// ==========================================
+function shutdown(sig) {
+  logger.info(`Received ${sig}, shutting down...`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 10000);
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+// ==========================================
+// AUTO-START EXISTING BOTS ON BOOT
+// ==========================================
 (async () => {
-  if (!fs.existsSync(SESSION_DIR)) return;
-  for (const f of await fsp.readdir(SESSION_DIR, { withFileTypes: true })) {
-    if (!f.isDirectory() || !f.name.startsWith("session_")) continue;
-    const username = cleanUsername(f.name.slice("session_".length));
-    if (!botOwnersDB[username]) {
-      botOwnersDB[username] = {
-        email: ADMIN_EMAIL,
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 20 * 24 * 60 * 60 * 1000
-      };
-      writeJson(BOT_OWNERS_FILE, botOwnersDB);
+  try {
+    const entries = Object.keys(botOwnersDB);
+    for (const username of entries) {
+      const meta = botOwnersDB[username];
+      if (!meta || Date.now() >= meta.expiresAt) continue;
+      const authDir = sessionPath(username);
+      try {
+        if (fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0) {
+          startBot(username).catch((e) =>
+            logger.error(`Auto-start ${username} failed: ${e.message}`)
+          );
+        }
+      } catch {}
     }
-    if (Date.now() < botOwnersDB[username].expiresAt) {
-      await startBot(username).catch(() => {});
-    }
+    logger.info(`🔁 Auto-start scan complete (${entries.length} bots found)`);
+  } catch (e) {
+    logger.error("Auto-start error: " + e.message);
   }
 })();
