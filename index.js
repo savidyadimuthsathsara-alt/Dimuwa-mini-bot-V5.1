@@ -3113,6 +3113,148 @@ app.get("/api/bots/:username/stats", requireAuth, (req, res) => {
     res.status(e.status || 500).json({ ok: false, error: e.message });
   }
 });
+// ==========================================
+// DASHBOARD COMPATIBILITY ROUTES (FOR index.html)
+// ==========================================
+app.get("/get-pairing-code", requireAuth, async (req, res) => {
+  try {
+    const username = String(req.query.username || "").trim();
+    const phone = String(req.query.phone || "").trim();
+    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
+    if (!phone) return res.status(400).json({ ok: false, error: "Phone number required." });
+
+    const clean = claimBotForUser(username, req);
+    const code = await getPairingCode(clean, phone);
+    pairingStore.set(clean, code);
+    res.json({ ok: true, code });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/qr", requireAuth, async (req, res) => {
+  try {
+    const username = String(req.query.username || "").trim();
+    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
+
+    const clean = claimBotForUser(username, req);
+    let sock = bots.get(clean);
+    if (!sock) sock = await startBot(clean);
+
+    if (isConnected(sock)) {
+      return res.json({ ok: true, connected: true });
+    }
+
+    const start = Date.now();
+    while (!qrStore.has(clean) && !isConnected(sock) && Date.now() - start < 30000) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (isConnected(sock)) {
+      return res.json({ ok: true, connected: true });
+    }
+    const qr = qrStore.get(clean);
+    if (!qr) return res.status(504).json({ ok: false, error: "QR not available. Please try again." });
+    res.json({ ok: true, connected: false, qr });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/details", requireAuth, (req, res) => {
+  try {
+    const username = String(req.query.username || "").trim();
+    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
+
+    const clean = assertBotAccess(req, username, { requireExisting: false });
+    const sock = bots.get(clean);
+    const connected = isConnected(sock);
+    const st = getStats(clean);
+    const jid = connected ? getOwnerJid(sock) : null;
+
+    res.json({
+      ok: true,
+      bot: {
+        username: clean,
+        connected,
+        status: connected ? "connected" : "offline",
+        phone: jid ? jidNumber(jid) : "-",
+        pushName: connected ? sock.user?.name || "-" : "-",
+        jid: jid || "-",
+        connectedAt: connected ? st.connectedAt || null : null
+      }
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/stats", requireAuth, (req, res) => {
+  try {
+    const username = String(req.query.username || "").trim();
+    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
+
+    const clean = assertBotAccess(req, username, { requireExisting: false });
+    const sock = bots.get(clean);
+    const connected = isConnected(sock);
+    const st = getStats(clean);
+    const uptime = connected && st.connectedAt ? Math.floor((Date.now() - st.connectedAt) / 1000) : 0;
+
+    res.json({
+      ok: true,
+      stats: { ...st, uptime }
+    });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/settings", requireAuth, (req, res) => {
+  try {
+    const username = String(req.query.username || "").trim();
+    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
+
+    const clean = assertBotAccess(req, username, { requireExisting: false });
+    res.json({ ok: true, settings: getSettings(clean) });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+});
+
+async function handleBotDisconnect(req, res) {
+  try {
+    const username = String(req.query.username || req.body?.username || "").trim();
+    if (!username) return res.status(400).json({ ok: false, error: "Username required." });
+
+    const clean = assertBotAccess(req, username, { requireExisting: false });
+    const sock = bots.get(clean);
+    if (sock) {
+      if (sock.__offlinePresenceTimer) {
+        clearInterval(sock.__offlinePresenceTimer);
+        sock.__offlinePresenceTimer = null;
+      }
+      try { await sock.logout(); } catch {}
+      try { sock.end(); } catch {}
+    }
+    bots.delete(clean);
+    qrStore.delete(clean);
+    pairingStore.delete(clean);
+    getStats(clean).connectedAt = null;
+    saveStats();
+
+    try {
+      const authDir = sessionPath(clean);
+      if (fs.existsSync(authDir)) {
+        fs.rmSync(authDir, { recursive: true, force: true });
+      }
+    } catch {}
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message });
+  }
+}
+
+app.post("/logout", requireAuth, handleBotDisconnect);
+app.post("/unlink", requireAuth, handleBotDisconnect);
 
 // ==========================================
 // ERROR HANDLERS & SERVER START
