@@ -626,7 +626,8 @@ const CACHE_TTL = 2 * 60 * 60 * 1000;
 // ==========================================
 const viewOnceMediaCache = new Map();
 const viewOnceInFlight = new Map();
-const VO_CACHE_TTL = 60 * 60 * 1000;
+const VO_CACHE_TTL = 24 * 60 * 60 * 1000; // View Once is only useful for ~24h anyway
+const VO_CACHE_MAX = 50; // buffers are large - do not keep hundreds in RAM
 const errorCooldowns = new Map();
 
 function getViewOnceCache(id) {
@@ -641,11 +642,56 @@ function getViewOnceCache(id) {
 function setViewOnceCache(id, media) {
   if (!id) return;
   viewOnceMediaCache.set(id, { ...media, cachedAt: Date.now() });
-  if (viewOnceMediaCache.size > 1000) viewOnceMediaCache.delete(viewOnceMediaCache.keys().next().value);
+  if (viewOnceMediaCache.size > VO_CACHE_MAX) viewOnceMediaCache.delete(viewOnceMediaCache.keys().next().value);
 }
 async function cacheViewOnceMedia(sock, msg) {
-  // View Once media is intentionally not cached or downloaded.
-  return false;
+  // FIX: View Once must be downloaded the moment it ARRIVES, with the
+  // ORIGINAL message (which still has mediaKey). A later reply/quote has
+  // the mediaKey stripped by WhatsApp, so it can never be downloaded then.
+  // This only caches media that was sent TO this bot account, in memory,
+  // for up to 24h, so the owner can later use "." / ".save" on it.
+  try {
+    const vo = unwrapViewOnce(msg);
+    if (!vo) return false;
+    const id = msg?.key?.id;
+    if (!id) return false;
+    if (getViewOnceCache(id)) return true;
+    if (viewOnceInFlight.has(id)) {
+      await viewOnceInFlight.get(id).catch(() => {});
+      return !!getViewOnceCache(id);
+    }
+    const p = (async () => {
+      try {
+        const buffer = await downloadMediaMessage(
+          msg,
+          "buffer",
+          {},
+          { logger, reuploadRequest: sock.updateMediaMessage }
+        );
+        if (!buffer?.length) return false;
+        setViewOnceCache(id, {
+          buffer,
+          mediaType: vo.type === "imageMessage" ? "image" : vo.type === "videoMessage" ? "video" : "audio",
+          content: vo.content,
+          remoteJid: msg.key.remoteJid,
+          sender: msg.key.participant || msg.key.remoteJid,
+          autoSent: false
+        });
+        return true;
+      } catch (e) {
+        // Web-class companions get only a placeholder for View Once, and
+        // an already-opened View Once has no mediaKey. Both are expected
+        // here - do not spam the owner for every one.
+        logger.warn(`ViewOnce cache failed (${id}): ${e.message}`);
+        return false;
+      }
+    })();
+    viewOnceInFlight.set(id, p);
+    try { return await p; } finally { viewOnceInFlight.delete(id); }
+  } catch (e) {
+    logger.warn("cacheViewOnceMedia error: " + e.message);
+    return false;
+  }
 }
 
 async function sendOwnerAlert(sock, location, errorMsg) {
@@ -862,9 +908,16 @@ async function handleStatus(username, sock, msg) {
     if (processedStatusIds.has(dedupeKey)) return;
     processedStatusIds.set(dedupeKey, Date.now());
 
-    const rawParticipant = msg.key.participant || msg.participant || null;
-    const altParticipant = msg.key.participantAlt || msg.key.participantPn || null;
-    if (!rawParticipant || rawParticipant === "status@broadcast") return;
+    // FIX: in Baileys 7 the sender is often only in participantAlt /
+    // participantPn (LID in participant, PN in alt, or vice versa).
+    // Returning early when key.participant alone is missing killed
+    // ALL status seen/react for those contacts.
+    const rawParticipant = msg.key.participant || msg.participant || msg.key.participantAlt || msg.key.participantPn || null;
+    const altParticipant = msg.key.participantAlt || msg.key.participantPn || msg.key.participant || null;
+    if (!rawParticipant || rawParticipant === "status@broadcast") {
+      logger.warn("[STATUS] No sender participant on status message - cannot seen/react");
+      return;
+    }
 
     const normRaw = safeNormalizeJid(rawParticipant);
     const normAlt = safeNormalizeJid(altParticipant);
@@ -897,14 +950,18 @@ async function handleStatus(username, sock, msg) {
     };
 
     if (s.statusRead === "ON") {
+      // FIX: readMessages() respects the account's read-receipt privacy
+      // setting - if read receipts are off it only sends "read-self",
+      // so the other person never sees you viewed their status.
+      // Send a direct "read" receipt to status@broadcast first.
+      const receiptTo = pnParticipant || lidParticipant || normRaw;
       try {
-        await sock.readMessages([statusKey]);
-        logger.info(`[STATUS READ] Seen -> ${pnParticipant || lidParticipant || normRaw}`);
+        await sock.sendReceipt("status@broadcast", receiptTo, [msg.key.id], "read");
+        logger.info(`[STATUS READ] Seen -> ${receiptTo}`);
       } catch (e) {
         try {
-          if (typeof sock.sendReceipt === "function") {
-            await sock.sendReceipt("status@broadcast", statusKey.participant, [msg.key.id], "read");
-          }
+          await sock.readMessages([statusKey]);
+          logger.info(`[STATUS READ] Seen (via readMessages) -> ${receiptTo}`);
         } catch (err) {
           logger.warn(`Status read failed: ${err.message}`);
           await sendOwnerAlert(sock, "Status Read Fail", err.message);
@@ -922,42 +979,29 @@ async function handleStatus(username, sock, msg) {
         reactText = (s.customStatusReact || "💚").trim() || "💚";
       }
 
-      const keyIsLid = String(statusKey.participant || "").endsWith("@lid");
-
+      // FIX: statusJidList must contain ONLY the status owner.
+      // Including the bot's own JID in the list made WhatsApp reject /
+      // silently drop the reaction for many contacts. Try the original
+      // key first, then PN, then LID - each with a single-recipient list.
       const attempts = [];
-      if (keyIsLid) {
-        if (lidParticipant) {
-          attempts.push({
-            key: statusKey,
-            statusJidList: [...new Set([lidParticipant, botLid || botPn].filter(Boolean))]
-          });
-        }
-        if (pnParticipant) {
-          attempts.push({
-            key: { ...statusKey, participant: pnParticipant },
-            statusJidList: [...new Set([pnParticipant, botPn].filter(Boolean))]
-          });
-        }
-      } else {
-        if (pnParticipant) {
-          attempts.push({
-            key: statusKey,
-            statusJidList: [...new Set([pnParticipant, botPn].filter(Boolean))]
-          });
-        }
-        if (lidParticipant) {
-          attempts.push({
-            key: { ...statusKey, participant: lidParticipant },
-            statusJidList: [...new Set([lidParticipant, botLid || botPn].filter(Boolean))]
-          });
-        }
+      const senderForList = pnParticipant || lidParticipant || normRaw;
+      if (senderForList) {
+        attempts.push({ key: statusKey, statusJidList: [senderForList] });
       }
-
-      if (!attempts.length && normRaw) {
+      if (pnParticipant && pnParticipant !== senderForList) {
         attempts.push({
-          key: statusKey,
-          statusJidList: [...new Set([normRaw, botPn, botLid].filter(Boolean))]
+          key: { ...statusKey, participant: pnParticipant },
+          statusJidList: [pnParticipant]
         });
+      }
+      if (lidParticipant && lidParticipant !== senderForList) {
+        attempts.push({
+          key: { ...statusKey, participant: lidParticipant },
+          statusJidList: [lidParticipant]
+        });
+      }
+      if (!attempts.length && normRaw) {
+        attempts.push({ key: statusKey, statusJidList: [normRaw] });
       }
 
       let reacted = false;
@@ -1001,6 +1045,7 @@ function unwrapMessageContent(message) {
       current.ephemeralMessage?.message ||
       current.viewOnceMessageV2Extension?.message ||
       current.viewOnceMessageV2?.message ||
+      current.viewOnceMessageV2Lid?.message ||
       current.viewOnceMessageV3?.message ||
       current.viewOnceMessage?.message;
     if (!wrapper) break;
@@ -1039,7 +1084,13 @@ function isViewOnceMessage(msg) {
 }
 function getMediaInfo(message) {
   if (!message) return null;
-  const m = normalizeMessageContent(message) || message;
+  // FIX: normalizeMessageContent alone does not always unwrap
+  // viewOnce/ephemeral/documentWithCaption wrappers. Use the same
+  // unwrapper as unwrapViewOnce, otherwise .save/.sticker on a
+  // wrapped message reports "Unsupported media."
+  // Accept both a full WAMessage ({message: {...}}) and raw content.
+  const raw = message.message || message;
+  const m = unwrapMessageContent(normalizeMessageContent(raw) || raw) || normalizeMessageContent(raw) || raw;
   const t = getContentType(m);
   const map = {
     imageMessage: "image",
@@ -1071,36 +1122,76 @@ function getQuotedMessage(msg, sock = null) {
   };
 }
 function buildDownloadMessage(message) {
-  const m = normalizeMessageContent(message.message) || message.message || {};
-  const t = getContentType(m);
-  const content = t ? m[t] : null;
-  const key = { ...(message.key || {}) };
-  if (content?.mediaKey) key.mediaKey = content.mediaKey;
-  if (content?.directPath) key.directPath = content.directPath;
-  if (content?.url) key.url = content.url;
-  return { key, message: message.message };
+  // FIX: downloadMediaMessage reads mediaKey/directPath/url from the
+  // MESSAGE CONTENT, not from key. Copying them into key did nothing
+  // useful and could confuse Baileys' re-upload / retry logic.
+  // Pass the original message through unchanged.
+  return { key: { ...(message.key || {}) }, message: message.message };
+}
+function resolveCachedOriginal(message) {
+  // A quoted copy of media often has its mediaKey stripped by WhatsApp.
+  // If this bot already saw the original message, use that cached copy
+  // instead - it still has the full mediaKey. This is the main fix for
+  // ".save" failing in private chats on a reply.
+  try {
+    if (!message?.key?.id) return message;
+    const cached = getCachedMessage(message.key);
+    if (!cached?.message) return message;
+    const a = getMediaInfo(cached.message);
+    const b = getMediaInfo(message.message);
+    if (a && (!b || a.type === b.type)) return cached;
+  } catch {}
+  return message;
 }
 async function downloadWhatsAppMedia(sock, message) {
-  const info = getMediaInfo(message.message);
+  const original = resolveCachedOriginal(message);
+  const info = getMediaInfo(original.message);
   if (!info) throw new Error("Unsupported media.");
-  const dlMsg = buildDownloadMessage(message);
-  const buffer = await downloadMediaMessage(
-    dlMsg,
-    "buffer",
-    {},
-    { logger, reuploadRequest: async (m) => sock.updateMediaMessage(m) }
-  );
-  if (!buffer?.length) throw new Error("Empty media buffer.");
-  return { buffer, ...info };
+  const dlMsg = buildDownloadMessage(original);
+  const ctx = { logger, reuploadRequest: sock.updateMediaMessage };
+  try {
+    const buffer = await downloadMediaMessage(dlMsg, "buffer", {}, ctx);
+    if (!buffer?.length) throw new Error("Empty media buffer.");
+    return { buffer, ...info };
+  } catch (firstErr) {
+    // FIX (Baileys 7.0.0-rc14): downloadMediaMessage's automatic
+    // re-upload often never fires (it checks error.status, Boom puts
+    // the code in error.output.statusCode). Explicitly ask the sender's
+    // device to re-upload, then retry once. This only works if the
+    // sender is online and the media is still on their device.
+    const msg = String(firstErr?.message || firstErr || "");
+    const isExpired = /404|410|empty media key|cannot derive|mediaKey|expired|not found/i.test(msg);
+    if (!isExpired) throw firstErr;
+    logger.warn(`Media download failed (${msg}) - requesting re-upload and retrying once`);
+    try {
+      const updated = await sock.updateMediaMessage(original);
+      // updateMediaMessage may return updated content; rebuild if so.
+      const retryMsg = updated?.message ? { key: original.key, message: updated.message } : original;
+      // Give Baileys a moment to process the media-update event.
+      await new Promise((r) => setTimeout(r, 1500));
+      const buffer = await downloadMediaMessage(buildDownloadMessage(retryMsg), "buffer", {}, ctx);
+      if (!buffer?.length) throw new Error("Empty media buffer after re-upload.");
+      return { buffer, ...info };
+    } catch (e) {
+      throw new Error(
+        "Media download failed: " + (e?.message || msg) +
+        " - the original may have expired, or the sender needs to be online to re-upload it."
+      );
+    }
+  }
 }
 
 // ==========================================
 // DOWNLOAD VIEW ONCE (FIXED WITH CACHE)
 // ==========================================
-async function downloadViewOnceMedia() {
-  throw new Error(
-    "View Once media is not saved by this bot. Ask the sender to resend it as regular media if they agree."
-  );
+async function downloadViewOnceMedia(sock, quotedOrId) {
+  // Returns cached View Once media by quoted stanza id, or null.
+  // There is NO way to download a View Once from its quoted copy alone -
+  // WhatsApp strips mediaKey from quotes - so this must come from the
+  // cache filled at arrival time (see cacheViewOnceMedia).
+  const id = typeof quotedOrId === "string" ? quotedOrId : quotedOrId?.key?.id;
+  if (!id) return null;
+  return getViewOnceCache(id);
 }
 
 async function sendWhatsAppMedia(sock, jid, media) {
@@ -1136,8 +1227,25 @@ function canProcessMessage(sock, username, msg) {
 }
 
 async function handleAutoSaveViewOnce(username, sock, msg) {
-  // Do not automatically save ephemeral View Once messages.
-  return false;
+  const s = getSettings(username);
+  if (s.autoSaveViewOnce !== "ON") return false;
+  if (!isViewOnceMessage(msg)) return false;
+  // Only for chats this bot is meant to handle (private by default).
+  // Group View Once is not auto-saved unless vvTarget is SAME.
+  const cached = await cacheViewOnceMedia(sock, msg);
+  if (!cached) return false;
+  const entry = getViewOnceCache(msg.key.id);
+  if (!entry || entry.autoSent) return true;
+  entry.autoSent = true;
+  try {
+    const target = s.vvTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+    if (!target) return true;
+    await sendWhatsAppMedia(sock, target, entry);
+    logger.info(`[VIEWONCE AUTO-SAVE] -> ${target} (${msg.key.id})`);
+  } catch (e) {
+    logger.warn("ViewOnce auto-save send failed: " + e.message);
+  }
+  return true;
 }
 
 // ==========================================
@@ -1146,10 +1254,24 @@ async function handleAutoSaveViewOnce(username, sock, msg) {
 async function handleViewOnce(sock, username, msg) {
   const q = getQuotedMessage(msg, sock);
   if (!q || !isViewOnceMessage(q)) return;
+  const cached = await downloadViewOnceMedia(sock, q);
+  if (cached) {
+    try {
+      await sendWhatsAppMedia(sock, msg.key.remoteJid, cached);
+      return;
+    } catch (e) {
+      logger.error("ViewOnce send from cache failed: " + e.message);
+    }
+  }
+  // No cache = bot never received the original with a mediaKey.
+  // This is a WhatsApp limitation, not a retryable bug: it happens if
+  // the message was sent before the bot was online, was already opened
+  // on the phone / WhatsApp Web / Desktop, was replied to from Web, or
+  // the bot was linked as a web-class device (see WA_BROWSER below).
   await sock.sendMessage(
     msg.key.remoteJid,
     {
-      text: "ℹ️ View Once media is not saved by this bot. If the sender agrees, ask them to resend it as a regular photo, video, or audio message."
+      text: "⚠️ *ViewOnce Save Failed:*\nWhatsApp වෙතින් mediaKey/URL නොලැබුණි.\n\nමේක fix කරන්න බෑ - original message එක bot එකට ලැබෙන වෙලාවෙම save වෙන්න ඕන. ඒක වෙන්නේ නැත්තේ:\n• Message එක දැනටමත් phone / Web / Desktop එකෙන් open කරලා\n• WhatsApp Web/Desktop වලින් reply කරලා\n• Message එක ආවේ bot එක offline වෙලා තියෙද්දි\n• Bot එක Android විදියට link වෙලා නැති නිසා\n\nඊළඟ වතාවේ: bot එක online තියෙද්දි, phone එකෙන් reply කරන්න, open කරන්න කලින්. නැත්නම් sender ට regular photo/video එකක් විදියට resend කරන්න කියන්න."
     },
     { quoted: msg }
   );
@@ -1158,14 +1280,18 @@ async function handleViewOnce(sock, username, msg) {
 async function handleSave(sock, username, msg) {
   const q = getQuotedMessage(msg, sock) || msg;
   if (isViewOnceMessage(q)) {
-    await sock.sendMessage(
-      msg.key.remoteJid,
-      {
-        text: "ℹ️ View Once media is not saved by this bot. Ask the sender to resend it as regular media if they agree."
-      },
-      { quoted: msg }
-    );
-    return;
+    const cached = await downloadViewOnceMedia(sock, q);
+    if (cached) {
+      try {
+        const target = getSettings(username).saveTarget === "SAME" ? msg.key.remoteJid : getOwnerJid(sock);
+        await sendWhatsAppMedia(sock, target, cached);
+        return;
+      } catch (e) {
+        logger.error(`.save (viewonce) error: ${e.message}`);
+      }
+    }
+    // Reuse the same clear explanation as "." - do not just alert owner.
+    return await handleViewOnce(sock, username, msg);
   }
   try {
     const media = await downloadWhatsAppMedia(sock, q);
@@ -1173,7 +1299,10 @@ async function handleSave(sock, username, msg) {
     if (!target) throw new Error("No target JID");
     await sendWhatsAppMedia(sock, target, media);
   } catch (e) {
+    // FIX: previously the user got NO reply at all on .save failure -
+    // only a throttled owner alert. Tell the user what failed.
     logger.error(`.save error: ${e.message}`);
+    await sock.sendMessage(msg.key.remoteJid, { text: `❌ Save failed: ${e.message}` }, { quoted: msg }).catch(() => {});
     await sendOwnerAlert(sock, "Save Command Error", e.message);
   }
 }
@@ -2173,7 +2302,10 @@ async function downloadSocialMedia(username, url, type) {
   const outputTemplate = path.join(MEDIA_DIR, `${jobId}.%(ext)s`);
 
   const formatArgs = type === "audio" ? ["-f", "bestaudio/best"] : ["-f", "best[ext=mp4]/best"];
-  const extraExtractorArgs = []; // Use yt-dlp default YouTube player-client selection.
+  // FIX: YouTube now blocks yt-dlp's default web player client
+  // ("Sign in to confirm you're not a bot"). Android/iOS clients
+  // are far less likely to be blocked.
+  const extraExtractorArgs = ["--extractor-args", "youtube:player_client=android,ios,web"];
 
   const args = [
     "--ignore-config",
@@ -2934,10 +3066,20 @@ async function startBot(username) {
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
     const { version } = await fetchLatestWaWebVersion().catch(() => ({ version: [2, 3000, 1038544855] }));
 
+    // FIX: WhatsApp does NOT deliver View Once media to web-class
+    // linked devices (Ubuntu/Chrome) - they only get a placeholder with
+    // no mediaKey. An Android companion DOES receive it. This requires
+    // a RE-PAIR after changing: unlink the old session and scan/pair
+    // again, otherwise the old web identity stays. Set WA_BROWSER=web
+    // to go back to the old identity if Android causes issues.
+    const useAndroidBrowser = String(process.env.WA_BROWSER || "android").toLowerCase() !== "web";
+    const browserIdentity = useAndroidBrowser
+      ? (typeof Browsers.android === "function" ? Browsers.android("Chrome") : ["Android", "Chrome", "121.0.0"])
+      : Browsers.ubuntu("Chrome");
     const sock = makeWASocket({
       version,
       auth: state,
-      browser: Browsers.ubuntu("Chrome"), // Supported Baileys browser preset
+      browser: browserIdentity,
       printQRInTerminal: false,
       logger,
       markOnlineOnConnect: false,
@@ -2947,9 +3089,13 @@ async function startBot(username) {
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
       retryRequestDelayMs: 2000,
+      // FIX: Baileys expects getMessage() to return proto.IMessage
+      // (the content), not the full WAMessage. Returning the full
+      // object broke retries / re-uploads, which broke media downloads
+      // and status reactions that need a retry.
       getMessage: async (k) => {
         const cached = getCachedMessage(k);
-        return cached?.message || cached || undefined;
+        return cached?.message?.message || undefined;
       }
     });
 
@@ -3043,7 +3189,14 @@ async function startBot(username) {
           continue;
         }
         if (ev.type === "notify") {
-          // View Once media is intentionally not cached or downloaded.
+          // FIX: cache View Once HERE, on arrival, while mediaKey is
+          // still present. handleMessage -> handleAutoSaveViewOnce also
+          // does this, but caching here covers messages that
+          // handleMessage returns early on (e.g. expired bots).
+          // Do it in the background - do not block other messages.
+          if (isViewOnceMessage(m)) {
+            cacheViewOnceMedia(sock, m).catch(() => {});
+          }
           handleMessage(clean, sock, m).catch((e) => sendOwnerAlert(sock, "Message Handler Error", e.message));
         }
       }
